@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:orientation="vertical"
+    android:padding="16dp">
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="> SYNCHROGAEA_v4.0"
+        android:textColor="#00FF41"
+        android:textSize="14sp"
+        android:typeface="monospace"
+        android:textStyle="bold" />
+    <EditText
+        android:id="@+id/etAddress"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:background="#111111"
+        android:padding="12dp"
+        android:textColor="#00FF41"
+        android:typeface="monospace"
+        android:inputType="textUri"
+        android:text="192.168.1.220:9999"
+        android:textSize="14sp" />
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+        <EditText
+            android:id="@+id/etFps"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="4dp"
+            android:background="#111111"
+            android:hint="FPS"
+            android:inputType="number"
+            android:padding="12dp"
+            android:text="7"
+            android:textColor="#00FF41"
+            android:textColorHint="#004411"
+            android:textSize="14sp"
+            android:typeface="monospace" />
+        <EditText
+            android:id="@+id/etRes"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="2"
+            android:layout_marginStart="4dp"
+            android:background="#111111"
+            android:hint="RES (1280x720)"
+            android:inputType="text"
+            android:padding="12dp"
+            android:text="1280x720"
+            android:textColor="#00FF41"
+            android:textColorHint="#004411"
+            android:textSize="14sp"
+            android:typeface="monospace" />
+    </LinearLayout>
+    <Button
+        android:id="@+id/btnConnect"
+        android:layout_width="match_parent"
+        android:layout_height="50dp"
+        android:layout_marginTop="8dp"
+        android:backgroundTint="#003300"
+        android:text="INIT_ESTABLISH_LINK"
+        android:textColor="#00FF41"
+        android:typeface="monospace"
+        android:textSize="14sp" />
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="[ SYSTEM_TERMINAL_LOG ]"
+        android:textColor="#00FF41"
+        android:textSize="10sp"
+        android:typeface="monospace" />
+    <ScrollView
+        android:id="@+id/logScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="8dp"
+        android:background="#050505"
+        android:padding="12dp">
+        <TextView
+            android:id="@+id/tvLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="> boot_sequence_complete\n> waiting_for_user_input..."
+            android:textColor="#00FF41"
+            android:textSize="12sp"
+            android:typeface="monospace" />
+    </ScrollView>
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="GAEA_UPLINK_PROTOCOL_V4_STABLE"
+        android:textColor="#00FF41"
+        android:textSize="8sp"
+        android:gravity="center"
+        android:alpha="0.3"
+        android:typeface="monospace" />
+
+</LinearLayout>
