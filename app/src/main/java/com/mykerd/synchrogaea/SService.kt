@@ -34,7 +34,7 @@ class SService : LifecycleService() {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
    // private var sampleRate = 44100
-    private var sampleRate = 8000
+    private var sampleRate = 16000
     private var lastFrameTime = 0L
     private val frameInterval = 1000L / 7
     private val jpegOutputStream = ByteArrayOutputStream()
@@ -187,6 +187,10 @@ class SService : LifecycleService() {
                     outputStream = DataOutputStream(newSocket.getOutputStream())
                     val inputStream = DataInputStream(newSocket.getInputStream())
                     broadcastLog("NET: UPLINK_ESTABLISHED!")
+                    Handler(Looper.getMainLooper()).post {
+                        initIncomingAudio()
+                        startAudioCapture()
+                    }
                     thread(start = true, name = "GaeaReceiveThread") {
                         try {
                             var audioBuffer = ByteArray(65536)
@@ -349,6 +353,11 @@ class SService : LifecycleService() {
             audioManager.startBluetoothSco()
             audioManager.isBluetoothScoOn = true
         }
+        try {
+            audioTrack?.stop()
+            audioTrack?.release()
+        } catch (e: Exception) {}
+        audioTrack = null
         val minBufSize = AudioTrack.getMinBufferSize(
             sampleRate,
             AudioFormat.CHANNEL_OUT_MONO,
@@ -368,17 +377,10 @@ class SService : LifecycleService() {
             .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
             .build()
         try {
-            audioTrack = AudioTrack(
-                audioAttributes,
-                audioFormat,
-                minBufSize,
-                AudioTrack.MODE_STREAM,
-                AudioManager.AUDIO_SESSION_ID_GENERATE
-            )
+            audioTrack = AudioTrack(audioAttributes, audioFormat, minBufSize, AudioTrack.MODE_STREAM, AudioManager.AUDIO_SESSION_ID_GENERATE)
             if (audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
                 audioTrack?.play()
-            } else {
-                broadcastLog("AUDIO_TRACK_ERR: Initialization failed")
+                broadcastLog("SYS: AUDIO_RECEIVER_READY")
             }
         } catch (e: Exception) {
             broadcastLog("AUDIO_TRACK_CRASH: ${e.message}")
@@ -519,30 +521,49 @@ class SService : LifecycleService() {
         try {
             outputStream?.flush()
             outputStream?.close()
+        } catch (e: Exception) { }
+        try {
             socket?.close()
         } catch (e: Exception) { }
         outputStream = null
         socket = null
+        try {
+            audioRecord?.let {
+                if (it.state == AudioRecord.STATE_INITIALIZED) {
+                    if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                        it.stop()
+                    }
+                }
+                it.release()
+            }
+        } catch (e: Exception) {
+            Log.e("GAEA", "Error releasing AudioRecord: ${e.message}")
+        }
+        audioRecord = null
+        try {
+            audioTrack?.let {
+                if (it.state == AudioTrack.STATE_INITIALIZED) {
+                    if (it.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                        it.stop()
+                    }
+                }
+                it.release()
+            }
+        } catch (e: Exception) {
+            Log.e("GAEA", "Error releasing AudioTrack: ${e.message}")
+        }
+        audioTrack = null
         val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         try {
             if (audioManager.isBluetoothScoOn) {
                 audioManager.stopBluetoothSco()
                 audioManager.isBluetoothScoOn = false
             }
+            audioManager.setSpeakerphoneOn(false)
             audioManager.mode = AudioManager.MODE_NORMAL
-        } catch (e: Exception) { }
-        try {
-            audioRecord?.apply {
-                if (state == AudioRecord.STATE_INITIALIZED && recordingState == AudioRecord.RECORDSTATE_RECORDING) stop()
-                release()
-            }
-            audioTrack?.apply {
-                if (state == AudioTrack.STATE_INITIALIZED && playState == AudioTrack.PLAYSTATE_PLAYING) stop()
-                release()
-            }
-        } catch (e: Exception) { }
-        audioRecord = null
-        audioTrack = null
+        } catch (e: Exception) {
+            Log.e("GAEA", "Error resetting AudioManager: ${e.message}")
+        }
     }
     override fun onDestroy() {
         isRunning = false
