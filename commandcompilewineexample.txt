@@ -1,0 +1,1 @@
+wine "C:\Python311\python.exe" -m PyInstaller --noconfirm --onefile --windowed --icon="iconserver.ico" --collect-all PIL --copy-metadata pillow --hidden-import PIL.JpegImagePlugin --hidden-import PIL.ImageTk --hidden-import tkinter --clean gaeaserver.py

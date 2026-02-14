@@ -1,0 +1,6 @@
+pyinstaller --noconfirm --onefile --windowed \
+--collect-all PIL \
+--copy-metadata pillow \
+--hidden-import PIL.JpegImagePlugin \
+--hidden-import PIL.ImageTk \
+--clean server.py
