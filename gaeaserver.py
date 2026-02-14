@@ -10,8 +10,8 @@ from io import BytesIO
 
 IP = '0.0.0.0'
 PORT = 9999
-SAMPLE_RATE = 44100
-CHUNK = 1024
+SAMPLE_RATE = 16000
+CHUNK = 800
 
 class GaeaServer:
     def __init__(self, root):
@@ -87,7 +87,7 @@ class GaeaServer:
             input_device_id = self.audio_devices[selected_device_name]
             if hasattr(self, 'p'): self.p.terminate()
             self.p = pyaudio.PyAudio()
-            rates_to_test = [44100, 48000, 16000, 32000, 8000]
+            rates_to_test = [16000, 48000, 44100, 32000, 8000]
             final_rate = None
             
             for rate in rates_to_test:
@@ -158,19 +158,26 @@ class GaeaServer:
                     while True:
                         self.conn, addr = s.accept()
                         self.conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                        self.conn.settimeout(5.0)
+                        self.conn.settimeout(10.0)
                         self.send_packet(3, f"SET_RATE:{SAMPLE_RATE}".encode())
                         self.status_var.set(f"CONNECTED TO: {addr[0]}")
                         self.root.after(0, self.enable_buttons)
+                        if self.mic_active:
+                            print("[SYSTEM] Restarting Mic Uplink for new connection...")
+                            threading.Thread(target=self.audio_sender, daemon=True).start()
                         try:
                             self.handle_client()
                         except: break
                         finally:
                             if self.conn: self.conn.close()
-            except: time.sleep(2)
+                            self.conn = None
+                            self.root.after(0, self.disable_buttons)
+            except Exception as e:
+                print(f"Socket Error: {e}")
+                time.sleep(2)
 
     def handle_client(self):
-        self.conn.settimeout(0.1)
+        #self.conn.settimeout(0.1)
         last_heartbeat = time.time()
         while self.conn:
             try:
@@ -178,6 +185,9 @@ class GaeaServer:
                     self.send_packet(0, b"ALIVE")
                     last_heartbeat = time.time()
                 header = self.recv_exact(5)
+                if header is None:
+                    print("[NETWORK] Client disconnected gracefully.")
+                    break
                 if not header: 
                     continue
                 msg_type = header[0]
@@ -190,7 +200,9 @@ class GaeaServer:
                         self.latest_frame = payload
                 elif msg_type == 2:
                     try:
-                        self.output_stream.write(bytes(payload))
+                        if self.output_stream.get_write_available() > 0:
+                            self.output_stream.write(bytes(payload))
+                        #self.output_stream.start_stream()
                     except:
                         pass
             except socket.timeout:
@@ -247,12 +259,20 @@ class GaeaServer:
             t.start()
 
     def audio_sender(self):
+        current_conn = self.conn
+        print("[*] MIC UPLINK: STARTED")
         while self.mic_active and self.conn:
             try:
                 data = self.input_stream.read(CHUNK, exception_on_overflow=False)
-                self.send_packet(2, data)
-            except: 
+                if data:
+                    self.send_packet(2, data)
+                else:
+                    break
+            except Exception as e:
+                print(f"[-] Error Mic Sender: {e}")
                 break
+        print("[*] MIC UPLINK: Terminated")
+                
 
     def enable_buttons(self):
         for btn in [self.vibrate_btn, self.mic_btn]: btn.config(state=tk.NORMAL)
