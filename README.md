@@ -69,8 +69,8 @@ stream.writeInt(cmdData.size)
 stream.write("SET_RATE:44100".toByteArray())
 ```
 
-##📜 License
+## 📜 License
 Distributed under the MIT License. See LICENSE for more information.
 
-##🤝 Contributing
+## 🤝 Contributing
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are greatly appreciated.
