@@ -1,3 +1,7 @@
+
+<img width="1916" height="1028" alt="Screen1" src="https://github.com/user-attachments/assets/d8d9c761-2987-4563-aa93-6635ff6b8144" />
+
+
 # 🛰️ SynchroGaea
 **The ultimate high-performance bridge for remote eyes and ears.**
 
@@ -8,6 +12,9 @@
 **SynchroGaea** is a sophisticated Android background engine designed for real-time security and remote monitoring. It transforms any Android device into a powerful uplink node, streaming high-frequency video and bi-directional audio to a central server with military-grade persistence.
 
 ---
+
+![screen2](https://github.com/user-attachments/assets/482ce6b6-d1de-42ba-883b-48df9e23703f)
+
 
 ## ✨ Core Features
 
