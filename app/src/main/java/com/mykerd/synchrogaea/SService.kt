@@ -24,6 +24,12 @@ import java.util.concurrent.Executors
 import kotlin.concurrent.thread
 import android.content.pm.ServiceInfo
 import android.util.Size
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 
 class SService : LifecycleService() {
     private var isRunning = false
@@ -33,7 +39,6 @@ class SService : LifecycleService() {
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
-   // private var sampleRate = 44100
     private var sampleRate = 16000
     private var lastFrameTime = 0L
     private val frameInterval = 1000L / 7
@@ -41,6 +46,7 @@ class SService : LifecycleService() {
     private var targetFps = 7L
     private var targetWidth = 1280
     private var targetHeight = 720
+    private var jpegQuality = 30
     private var lastDataSentTime = System.currentTimeMillis()
     companion object {
         const val LOG_ACTION = "com.mykerd.synchrogaea.LOG_MSG"
@@ -155,6 +161,12 @@ class SService : LifecycleService() {
         val ip = intent?.getStringExtra("SERVER_IP") ?: defaultIp
         val port = intent?.getStringExtra("SERVER_PORT")?.toIntOrNull() ?: defaultPort
         val newTarget = "$ip:$port"
+        val intentQual = intent?.getIntExtra("CAM_QUALITY", -1) ?: -1
+        if (intentQual != -1) {
+            this.jpegQuality = intentQual
+        } else {
+            this.jpegQuality = prefs.getInt("cam_qual", 30)
+        }
         if (newTarget != currentTarget) {
             stopEngines()
             currentTarget = newTarget
@@ -177,9 +189,8 @@ class SService : LifecycleService() {
                 var currentSocketInstance: Socket? = null
                 try {
                     broadcastLog("NET: CONNECTING TO $ip:$port...")
-                    val newSocket = Socket()
+                    val newSocket = createSmartSocket(ip, port)
                     currentSocketInstance = newSocket
-                    newSocket.connect(InetSocketAddress(ip, port), 10000)
                     newSocket.tcpNoDelay = true
                     newSocket.keepAlive = true
                     newSocket.soTimeout = 20000
@@ -284,8 +295,8 @@ class SService : LifecycleService() {
                 val targetFps = prefs.getLong("cam_fps", 7L)
                 val resStr = prefs.getString("cam_res", "1280x720") ?: "1280x720"
                 val resParts = resStr.split("x")
-                val targetWidth = if (resParts.size == 2) resParts[0].toInt() else 1280
-                val targetHeight = if (resParts.size == 2) resParts[1].toInt() else 720
+                val targetWidth = if (resParts.size == 2) resParts[0].toIntOrNull() ?: 1280 else 1280
+                val targetHeight = if (resParts.size == 2) resParts[1].toIntOrNull() ?: 720 else 720
                 val currentFrameInterval = 1000L / targetFps
                 val imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(targetWidth, targetHeight))
@@ -297,6 +308,8 @@ class SService : LifecycleService() {
                         val currentTime = System.currentTimeMillis()
                         val currentSocket = outputStream
                         if (isRunning && currentSocket != null && (currentTime - lastFrameTime) >= currentFrameInterval) {
+                            val prefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
+                            this.jpegQuality = prefs.getInt("cam_qual", 30)
                             val jpegBytes = imageToJpeg(imageProxy)
                             if (jpegBytes.isNotEmpty()) {
                                 sendData(1, jpegBytes)
@@ -388,6 +401,13 @@ class SService : LifecycleService() {
     }
     private fun handleCommand(cmd: String) {
         when {
+            cmd.startsWith("SET_QUALITY:") -> {
+                val newQual = cmd.substringAfter(":").toIntOrNull() ?: return
+                jpegQuality = newQual.coerceIn(1, 100)
+                val prefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
+                prefs.edit().putInt("cam_qual", jpegQuality).apply()
+                broadcastLog("CMD: JPEG_QUALITY_UPDATED -> $jpegQuality%")
+            }
             cmd.startsWith("VIBRATE") -> {
                 val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                     val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
@@ -461,8 +481,7 @@ class SService : LifecycleService() {
         }
         jpegOutputStream.reset()
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, width, height, null)
-        //yuvImage.compressToJpeg(Rect(0, 0, width, height), 60, jpegOutputStream)
-        yuvImage.compressToJpeg(Rect(0, 0, width, height), 30, jpegOutputStream)
+        yuvImage.compressToJpeg(Rect(0, 0, width, height), jpegQuality, jpegOutputStream)
         image.close()
         return jpegOutputStream.toByteArray()
     }
@@ -507,6 +526,28 @@ class SService : LifecycleService() {
                 }
                 manager?.createNotificationChannel(serviceChannel)
             }
+        }
+    }
+    private fun createSmartSocket(ip: String, port: Int): Socket {
+        try {
+            val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
+                override fun checkClientTrusted(chain: Array<X509Certificate>?, authType: String?) {}
+                override fun checkServerTrusted(chain: Array<X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            })
+            val sc = SSLContext.getInstance("TLS")
+            sc.init(null, trustAllCerts, SecureRandom())
+            val factory = sc.socketFactory
+            val sslSocket = factory.createSocket() as SSLSocket
+            sslSocket.connect(InetSocketAddress(ip, port), 7000)
+            sslSocket.startHandshake()
+            broadcastLog("NET: UPLINK_ENCRYPTED (TLS)")
+            return sslSocket
+        } catch (e: Exception) {
+            broadcastLog("NET: SSL_OFF -> FALLBACK_CLEARTEXT")
+            val normalSocket = Socket()
+            normalSocket.connect(InetSocketAddress(ip, port), 7000)
+            return normalSocket
         }
     }
     private fun broadcastLog(msg: String) {

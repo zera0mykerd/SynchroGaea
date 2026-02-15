@@ -47,6 +47,9 @@ class MainActivity : Activity() {
         etFps?.setText(prefs.getLong("cam_fps", 7L).toString())
         etRes?.setText(prefs.getString("cam_res", "1280x720"))
         etAddress?.setText(lastSavedIp)
+        val etQuality = findViewById<EditText>(R.id.etQuality)
+        val savedQual = prefs.getInt("cam_qual", 30)
+        etQuality?.setText(savedQual.toString())
         if (lastSavedIp != null && lastSavedIp.contains(":")) {
             initiateConnection(lastSavedIp)
         }
@@ -57,14 +60,16 @@ class MainActivity : Activity() {
             val newAddr = etAddress?.text?.toString() ?: ""
             val newFps = etFps?.text?.toString()?.toLongOrNull() ?: 7L
             val newRes = etRes?.text?.toString() ?: "1280x720"
+            val newQual = etQuality?.text?.toString()?.toIntOrNull() ?: 30
             if (newAddr.contains(":") && !newAddr.endsWith(":")) {
                 prefs.edit().apply {
                     putString(KEY_IP, newAddr)
                     putLong("cam_fps", newFps)
                     putString("cam_res", newRes)
+                    putInt("cam_qual", newQual)
                     apply()
                 }
-                logTerminal("CONNECTING_TO: $newAddr")
+                logTerminal("CONNECTING_TO: $newAddr | Q: $newQual")
                 initiateConnection(newAddr)
             } else {
                 logTerminal("SYNTAX_ERROR: USE IP:PORT")
@@ -147,37 +152,3 @@ class MainActivity : Activity() {
         super.onDestroy()
     }
 }
-
-/* * *****************************************************************************
- * 🛡️ EASTER EGG: THE "MINER'S ENCRYPTION" GUIDE (SSL/TLS IMPLEMENTATION) 🛡️
- * *****************************************************************************
- * Current System: Plaintext TCP (Lightweight, Fast, 4G Optimized).
- * Upgrade Path: If you need Bank-Level security for industrial secrets,
- * follow this technical blueprint to wrap your sockets in SSL/TLS.
- *
- * STEP 1: SERVER-SIDE (Python - GaeaServer)
- * -----------------------------------------
- * 1. Generate keys:
- * openssl req -newkey rsa:2048 -nodes -keyout server.key -x509 -days 365 -out server.crt
- * 2. In 'start_socket', wrap the accepted connection:
- * import ssl
- * context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
- * context.load_cert_chain(certfile="server.crt", keyfile="server.key")
- * # After self.conn, addr = s.accept():
- * self.conn = context.wrap_socket(self.conn, server_side=True)
- *
- * STEP 2: CLIENT-SIDE (Android - SService.kt)
- * -------------------------------------------
- * 1. In 'startNetworkEngine', replace 'Socket()' with 'SSLSocket':
- * val factory = SSLSocketFactory.getDefault()
- * val sslSocket = factory.createSocket() as SSLSocket
- * sslSocket.connect(InetSocketAddress(ip, port), 10000)
- * sslSocket.startHandshake()
- * socket = sslSocket
- *
- * NOTE: For Self-Signed certs, you must implement a 'TrustManager' that
- * accepts your specific 'server.crt' to avoid 'HandshakeException'.
- *
- * "Trust the code, but encrypt the path. Stay safe underground."
- * *****************************************************************************
- */

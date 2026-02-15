@@ -30,6 +30,7 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:orientation="horizontal">
+
         <EditText
             android:id="@+id/etFps"
             android:layout_width="0dp"
@@ -45,17 +46,34 @@
             android:textColorHint="#004411"
             android:textSize="14sp"
             android:typeface="monospace" />
+
         <EditText
             android:id="@+id/etRes"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:layout_weight="2"
-            android:layout_marginStart="4dp"
+            android:layout_weight="1.5"
+            android:layout_marginHorizontal="4dp"
             android:background="#111111"
-            android:hint="RES (1280x720)"
+            android:hint="RES"
             android:inputType="text"
             android:padding="12dp"
             android:text="1280x720"
+            android:textColor="#00FF41"
+            android:textColorHint="#004411"
+            android:textSize="14sp"
+            android:typeface="monospace" />
+
+        <EditText
+            android:id="@+id/etQuality"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="4dp"
+            android:background="#111111"
+            android:hint="QUAL"
+            android:inputType="number"
+            android:padding="12dp"
+            android:text="30"
             android:textColor="#00FF41"
             android:textColorHint="#004411"
             android:textSize="14sp"
