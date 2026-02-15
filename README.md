@@ -13,7 +13,6 @@
 
 ---
 
-![screen2](https://github.com/user-attachments/assets/482ce6b6-d1de-42ba-883b-48df9e23703f)
 <img src="https://github.com/user-attachments/assets/482ce6b6-d1de-42ba-883b-48df9e23703f" width="256">
 
 ## ✨ Core Features
