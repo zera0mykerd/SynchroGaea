@@ -78,5 +78,27 @@ stream.write("SET_RATE:44100".toByteArray())
 ## 📜 License
 Distributed under the MIT License. See LICENSE for more information.
 
+## SSL/TLS Compatible:
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes
+```
+### ⚙️ How to use it
+1.  **Generate Files:** Place the generated `server.key` and `server.crt` files into the server's root directory.
+2.  **Auto-Detection:** On startup, the server will look for these files. If found, it initializes the SSL context and logs:  
+    `[SYSTEM] SSL Success! 🔒`
+3.  **Encrypted Uplink:** When a compatible client connects, the terminal will confirm:  
+    `[*] SSL Connection from [IP_ADDRESS]`
+
+> [!IMPORTANT]
+> **Compatibility:** If the certificates are missing, the server will automatically fallback to standard **Cleartext mode**. This ensures the server remains functional across all environments without manual reconfiguration.
+
+---
+
+### Technical Highlights
+* **Protocol:** TLS 1.2/1.3 (depending on local OpenSSL version).
+* **Cipher:** High-grade RSA 4096-bit encryption.
+* **Zero-Port Conflict:** Uses a `MSG_PEEK` strategy to distinguish between SSL handshakes and raw TCP data on the fly.
+
+
 ## 🤝 Contributing
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are greatly appreciated.
