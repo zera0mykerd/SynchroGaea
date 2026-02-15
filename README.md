@@ -75,9 +75,6 @@ stream.writeInt(cmdData.size)
 stream.write("SET_RATE:44100".toByteArray())
 ```
 
-## 📜 License
-Distributed under the MIT License. See LICENSE for more information.
-
 ## SSL/TLS Compatible:
 ```bash
 openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes
@@ -102,3 +99,6 @@ openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 
 
 ## 🤝 Contributing
 Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are greatly appreciated.
+
+## 📜 License
+Distributed under the MIT License. See LICENSE for more information.
