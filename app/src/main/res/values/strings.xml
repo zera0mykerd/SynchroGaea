@@ -1,3 +1,13 @@
 <resources>
     <string name="app_name">SynchroGaea</string>
+    <string-array name="resolutions_array">
+        <item>256x144 (144p)</item>
+        <item>426x240 (240p)</item>
+        <item>640x360 (360p)</item>
+        <item>854x480 (480p)</item>
+        <item>1280x720 (720p)</item>
+        <item>1920x1080 (1080p)</item>
+        <item>2560x1440 (1440p)</item>
+        <item>3840x2160 (2160p)</item>
+    </string-array>
 </resources>

@@ -8,4 +8,11 @@
 -keep public class * extends android.app.Service
 -keep public class * extends android.content.BroadcastReceiver
 -keep public class * extends android.content.ContentProvider
+-keep class androidx.camera.camera2.** { *; }
+-keep class androidx.camera.core.** { *; }
+-keep class androidx.camera.video.** { *; }
+-keep interface androidx.camera.core.impl.** { *; }
+-keep class androidx.lifecycle.** { *; }
+-keep class javax.net.** { *; }
+-keep class com.android.org.conscrypt.** { *; }
 -keep class kotlin.Metadata { *; }
