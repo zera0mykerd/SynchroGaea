@@ -102,3 +102,37 @@ Contributions are what make the open-source community such an amazing place to l
 
 ## 📜 License
 Distributed under the MIT License. See LICENSE for more information.
+
+
+---
+
+## ⚖️ Legal Disclaimer & Privacy Notice
+
+### Disclaimer of Liability
+
+SynchroGaea is provided **"as is"**, without warranty of any kind, express or implied.  
+The author assumes **no responsibility or liability** for any misuse, damage, legal consequences, or violations of local, national, or international laws resulting from the use of this software.
+
+Users are solely responsible for ensuring that their use of SynchroGaea complies with all applicable laws and regulations, including but not limited to privacy, surveillance, and consent laws in their jurisdiction.
+
+The author shall not be held liable for any direct, indirect, incidental, special, exemplary, or consequential damages arising from the use or misuse of this project.
+
+---
+
+### Privacy Notice
+
+SynchroGaea **does not collect, store, transmit, or share any personal data** on behalf of the author.
+
+The software operates solely as a self-hosted client-server communication engine.  
+All data transmission occurs exclusively between devices and servers configured and controlled by the end user.
+
+The author:
+- Does **not** operate any central servers  
+- Does **not** receive telemetry or analytics  
+- Does **not** collect user information of any kind  
+
+Any data handling, storage, or processing performed using this software is the sole responsibility of the user.
+
+---
+
+By using this software, you acknowledge and agree to this disclaimer.
