@@ -17,30 +17,31 @@ import ssl
 import tempfile
 import os
 import time
+import hashlib
+import getpass
+import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ── CONFIG ────────────────────────────────────────────────────────────────────
+RESET   = "\033[0m"
+BOLD    = "\033[1m"
+GREEN   = "\033[92m"
+CYAN    = "\033[96m"
+YELLOW  = "\033[93m"
+MAGENTA = "\033[95m"
+RED     = "\033[91m"
+
 TCP_PORT  = 9999
 HTTP_PORT = 8080
 WS_PORT   = 8765
-
-# Max accepted payload per packet (16 MB). Protects against malformed/OOM.
 MAX_PAYLOAD = 16_000_000
-# StreamReader internal buffer cap — prevents unbounded memory growth.
-TCP_READER_LIMIT = 8 * 1024 * 1024   # 8 MB
-
-# ── GLOBAL STATE (single asyncio thread — no locks needed) ───────────────────
+#TCP_READER_LIMIT = 8 * 1024 * 1024
+TCP_READER_LIMIT = 128 * 1024
 _ws_clients: set   = set()
-_android_writer    = None   # asyncio.StreamWriter | None
-
-# Pre-built envelope bytes so we never re-allocate on the hot path.
-# Format: [type:1][len:4][payload:N]
-_FRAME_HDR  = bytes([1])   # JPEG  → browser prefix
-_AUDIO_HDR  = bytes([2])   # Audio → browser prefix
-_LOG_HDR    = bytes([255]) # Log   → browser prefix
-
-# ── HTML PAGE ─────────────────────────────────────────────────────────────────
-# Defined as str, encoded to bytes once at module load — avoids per-request encode.
+_android_writer    = None
+_FRAME_HDR  = bytes([1])
+_AUDIO_HDR  = bytes([2])
+_LOG_HDR    = bytes([255])
+_BANNED_IPS = {}
 HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -106,7 +107,6 @@ select{background:var(--s);border:1px solid var(--bdr);color:var(--g);
     <div id="ovl">FPS: -- | --x--</div>
   </div>
   <aside>
-    <!-- VIDEO -->
     <div class="card">
       <h2>VIDEO</h2>
       <div class="row">
@@ -129,7 +129,6 @@ select{background:var(--s);border:1px solid var(--bdr);color:var(--g);
         <button id="mv" onclick="toggleMirror('v')">&#x21C5; MIRROR V</button>
       </div>
     </div>
-    <!-- AUDIO -->
     <div class="card">
       <h2>AUDIO</h2>
       <div class="row">
@@ -145,12 +144,11 @@ select{background:var(--s);border:1px solid var(--bdr);color:var(--g);
       <button id="btnA" onclick="toggleAudio()" style="margin-top:6px">&#128266; ENABLE AUDIO</button>
       <button id="btnM" onclick="toggleMic()" style="margin-top:6px">&#127897; ENABLE MIC</button>
     </div>
-    <!-- COMMANDS -->
     <div class="card">
       <h2>COMMANDS</h2>
       <button class="danger" onclick="sendVibrate()">&#9889; VIBRATE</button>
+      <button id="btnRec" onclick="toggleWebRec()" style="margin-top:6px; border-color:var(--y); color:var(--y)">🔴 START WEB REC</button>
     </div>
-    <!-- LOG -->
     <div class="card" style="flex:1;display:flex;flex-direction:column;min-height:100px">
       <h2>LOG</h2>
       <div id="log"></div>
@@ -159,19 +157,21 @@ select{background:var(--s);border:1px solid var(--bdr);color:var(--g);
 </main>
 <script type="text/javascript">
 'use strict';
-const WS = 'ws://'+location.hostname+':8765';
+const WS = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.hostname + ':8765';
 const img = document.getElementById('vid');
 const ovl = document.getElementById('ovl');
 const st  = document.getElementById('st');
 const logEl = document.getElementById('log');
-
 let ws;
 let rot=0, mh=false, mv=false;
 let fpsCnt=0, fpsT=performance.now(), fps=0;
-
-/* ── Audio (scheduled PCM playback, no glitches) ── */
 let actx=null, audioOn=false, nextT=0;
-
+let mediaRecorder;
+let recordedChunks = [];
+let recCanvas = document.createElement('canvas');
+let recCtx = recCanvas.getContext('2d');
+let audioDest;
+let isRecording = false;
 function toggleAudio(){
   if(!actx){
     actx = new (window.AudioContext||window.webkitAudioContext)(
@@ -184,7 +184,6 @@ function toggleAudio(){
   b.classList.toggle('on', audioOn);
   log('Audio '+(audioOn?'ON':'OFF'));
 }
-
 function playPCM(ab){
   if(!audioOn||!actx) return;
   const n = ab.byteLength>>1;
@@ -194,44 +193,99 @@ function playPCM(ab){
   const dv  = new DataView(ab);
   for(let i=0;i<n;i++) ch[i]=dv.getInt16(i<<1,true)*3.0517578125e-5; // /32768
   const s=actx.createBufferSource(); s.buffer=buf; s.connect(actx.destination);
+  if(isRecording && audioDest) s.connect(audioDest);
   const now=actx.currentTime;
   if(nextT<now+0.02) nextT=now+0.08;
   s.start(nextT); nextT+=buf.duration;
 }
-
-/* ── WebSocket ── */
+function toggleWebRec() {
+    if (!isRecording) {
+        startWebRec();
+    } else {
+        stopWebRec();
+    }
+}
+function startWebRec() {
+    recordedChunks = [];
+    const isPortrait = (rot === 90 || rot === 270);
+    const nw = img.naturalWidth || 1920;
+    const nh = img.naturalHeight || 1080;
+    recCanvas.width = isPortrait ? nh : nw;
+    recCanvas.height = isPortrait ? nw : nh;
+    const videoStream = recCanvas.captureStream(30);
+    let tracks = [videoStream.getVideoTracks()[0]];
+    if (actx) {
+        audioDest = actx.createMediaStreamDestination();
+        tracks.push(audioDest.stream.getAudioTracks()[0]);
+    }
+    const combinedStream = new MediaStream(tracks);
+    mediaRecorder = new MediaRecorder(combinedStream, { 
+        mimeType: 'video/webm;codecs=vp8,opus', 
+        bitsPerSecond: 5000000 
+    });
+    mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = exportRec;
+    mediaRecorder.start();
+    isRecording = true;
+    document.getElementById('btnRec').textContent = "⏹ STOP & SAVE REC";
+    document.getElementById('btnRec').classList.add('on');
+    log("Web Recording started (AV)...");
+}
+function stopWebRec() {
+    mediaRecorder.stop();
+    isRecording = false;
+    document.getElementById('btnRec').textContent = "🔴 START WEB REC";
+    document.getElementById('btnRec').classList.remove('on');
+}
+function exportRec() {
+    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Synchro_WebRec_${new Date().getTime()}.webm`;
+    a.click();
+    URL.revokeObjectURL(url);
+    log("Recording saved to Downloads");
+}
 function connect(){
   ws = new WebSocket(WS);
   ws.binaryType='arraybuffer';
-  ws.onopen  = ()=>{ log('WS connected'); setS('warn','WAITING FOR APP...'); };
-  ws.onclose = ()=>{ log('WS closed — retrying...'); setS('err','DISCONNECTED'); setTimeout(connect,2000); };
-  ws.onerror = ()=>{ log('WS error'); };
+  ws.onopen  = ()=>{ log('WSS connected'); setS('warn','WAITING FOR APP...'); };
+  ws.onclose = ()=>{ log('WSS closed — retrying...'); setS('err','DISCONNECTED'); setTimeout(connect,2000); };
+  ws.onerror = ()=>{ log('WSS error'); };
   ws.onmessage = onMsg;
 }
-
 function onMsg(e){
   if(typeof e.data==='string'){
     try{ const d=JSON.parse(e.data); if(d.log) log(d.log); }catch(_){}
     return;
   }
-  /* Binary: first byte = type, rest = payload (zero-copy via DataView) */
   const ab = e.data;
   if(ab.byteLength<2) return;
   const type = new DataView(ab,0,1).getUint8(0);
-  const payload = ab.slice(1);   /* ArrayBuffer.slice — O(1) view */
-
+  const payload = ab.slice(1);
   if(type===1){
-    /* ── JPEG frame: decode directly into <img>, skip Blob when possible ── */
+    if (img.loading === true) return; 
+    img.loading = true;
     const prev = img.src;
-    /* Use createObjectURL — single allocation, browser handles decode async */
     const url = URL.createObjectURL(new Blob([payload],{type:'image/jpeg'}));
     img.onload = function(){
+      img.loading = false;
       if(prev.startsWith('blob:')) URL.revokeObjectURL(prev);
-      /* Update overlay only after real decode — avoids layout thrash */
       ovl.textContent='FPS: '+fps+' | '+img.naturalWidth+'\xd7'+img.naturalHeight;
+      if(isRecording) {
+          const cw = recCanvas.width, ch = recCanvas.height;
+          const nw = img.naturalWidth, nh = img.naturalHeight;
+          recCtx.save();
+          recCtx.clearRect(0, 0, cw, ch);
+          recCtx.translate(cw / 2, ch / 2);
+          recCtx.rotate(rot * Math.PI / 180);
+          recCtx.scale(mh ? -1 : 1, mv ? -1 : 1);
+          recCtx.drawImage(img, -nw / 2, -nh / 2);
+          recCtx.restore();
+      }
     };
     img.src = url;
-    /* FPS counter */
     fpsCnt++;
     const now=performance.now();
     if(now-fpsT>=1000){ fps=Math.round(fpsCnt*1000/(now-fpsT)); fpsCnt=0; fpsT=now; }
@@ -242,8 +296,6 @@ function onMsg(e){
     log(new TextDecoder().decode(payload));
   }
 }
-
-/* ── Commands ── */
 function send(o){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(o)); }
 function sendQuality(){ const q=+document.getElementById('qs').value; send({cmd:'SET_QUALITY',value:q}); log('SET_QUALITY '+q); }
 function sendVibrate(){ send({cmd:'VIBRATE'}); log('VIBRATE sent'); }
@@ -255,8 +307,6 @@ function syncRate(){
     document.getElementById('btnA').classList.remove('on'); }
   log('SET_RATE '+r);
 }
-
-/* ── Transform ── */
 function setRot(d){
   rot=d;
   ['r0','r90','r180','r270'].forEach(id=>document.getElementById(id).classList.remove('on'));
@@ -271,43 +321,33 @@ function toggleMirror(a){
 function applyXform(){
   img.style.transform='rotate('+rot+'deg) scale('+(mh?-1:1)+','+(mv?-1:1)+')';
 }
-
-/* ── Status / Log ── */
 function setS(c,t){ st.className=c; st.textContent=t; }
 function log(m){
   const p=document.createElement('p');
   p.textContent='['+new Date().toLocaleTimeString()+'] '+m;
   logEl.appendChild(p);
-  /* Cap at 200 entries to prevent unbounded DOM growth */
   while(logEl.childElementCount>200) logEl.removeChild(logEl.firstChild);
   logEl.scrollTop=logEl.scrollHeight;
 }
-
-/* ── Mic capture → send PCM to app via server ── */
 let micOn=false, micStream=null, micProc=null, micSrc=null, micCtx=null;
-
 function toggleMic(){
   if(!micOn){ startMic(); } else { stopMic(); }
 }
-
 function startMic(){
   navigator.mediaDevices.getUserMedia({audio:{sampleRate:16000,channelCount:1,echoCancellation:true,noiseSuppression:true},video:false})
   .then(function(stream){
     micStream = stream;
     micCtx = new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
     micSrc  = micCtx.createMediaStreamSource(stream);
-    /* ScriptProcessor: simple, no worker needed for this use-case */
     micProc = micCtx.createScriptProcessor(4096,1,1);
     micProc.onaudioprocess = function(ev){
       if(!micOn||!ws||ws.readyState!==1) return;
       const input = ev.inputBuffer.getChannelData(0);
-      /* Convert float32 → int16 PCM */
       const pcm = new Int16Array(input.length);
       for(var i=0;i<input.length;i++){
         var s = Math.max(-1, Math.min(1, input[i]));
         pcm[i] = s < 0 ? s*32768 : s*32767;
       }
-      /* Send as binary: type byte 2 + raw PCM */
       const pkt = new Uint8Array(1 + pcm.byteLength);
       pkt[0] = 2;
       pkt.set(new Uint8Array(pcm.buffer), 1);
@@ -322,7 +362,6 @@ function startMic(){
   })
   .catch(function(err){ log('Mic error: '+err.message); });
 }
-
 function stopMic(){
   micOn = false;
   try{ micProc.disconnect(); micSrc.disconnect(); micCtx.close(); }catch(_){}
@@ -332,42 +371,174 @@ function stopMic(){
   b.textContent='\U0001f3a4 ENABLE MIC'; b.classList.remove('on');
   log('Mic OFF');
 }
-
-/* ── WS keep-alive: ping every 15 s to prevent idle disconnects ── */
 setInterval(function(){
   if(ws && ws.readyState===1) ws.send(JSON.stringify({cmd:'PING'}));
 }, 15000);
-
 connect();
 log('UI ready');
 </script>
+<script type="text/javascript" id="sec-script" data-hash="">
+async function securityCheck() {
+    const serverHash = document.getElementById('sec-script').getAttribute('data-hash');
+    if (!serverHash || serverHash.length < 64) {
+        document.body.innerHTML = "<h1 style='color:red;text-align:center;margin-top:20%'>🚨 SECURITY BREACH: INVALID FINGERPRINT</h1>";
+        if(ws) ws.close();
+        return;
+    }
+    log("🔒 Session Fingerprint: " + serverHash.substring(0, 16) + "...");
+}
+securityCheck();
+</script>
 </body>
 </html>"""
-
-HTML      = HTML.encode("utf-8")   # encode once, reuse bytes on every request
+HTML      = HTML.encode("utf-8")
 _HTML_LEN = str(len(HTML)).encode()
-
-
-# ── HTTP (static, thread-safe: only reads immutable HTML bytes) ───────────────
+def check_or_create_password():
+    file_path = "pasw.txt"
+    if os.path.exists(file_path):
+        with open(file_path, "r") as f:
+            lines = f.read().splitlines()
+            if len(lines) >= 2:
+                return lines[0], lines[1]
+    print(f"\n{MAGENTA}{BOLD}╔══════════════════════════════════════╗{RESET}")
+    print(f"{MAGENTA}{BOLD}║         🔐 SERVER SECURITY SETUP      ║{RESET}")
+    print(f"{MAGENTA}{BOLD}╚══════════════════════════════════════╝{RESET}\n")
+    print(f"{CYAN}{BOLD}[SETUP]{RESET} Welcome! Configure your admin credentials.\n")
+    while True:
+        user = input(f"{YELLOW}➜ Enter new Username: {RESET}").strip()
+        if not user:
+            print(f"{RED}{BOLD}✖ Username cannot be empty!{RESET}\n")
+            continue
+        break
+    while True:
+        pwd = getpass.getpass(f"{YELLOW}➜ Enter new Password: {RESET}")
+        confirm_pwd = getpass.getpass(f"{YELLOW}➜ Confirm Password: {RESET}")
+        if not pwd:
+            print(f"{RED}{BOLD}✖ Password cannot be empty!{RESET}\n")
+            continue
+        if pwd != confirm_pwd:
+            print(f"{RED}{BOLD}✖ Passwords do not match. Try again.{RESET}\n")
+            continue
+        break
+    salt = os.urandom(16).hex()
+    user_hashed = hashlib.sha256(user.encode()).hexdigest()
+    pass_with_salt = salt + pwd
+    pass_hashed = hashlib.sha256(pass_with_salt.encode()).hexdigest()
+    with open(file_path, "w") as f:
+        f.write(f"{user_hashed}\n{salt}:{pass_hashed}")
+    print(f"\n{GREEN}{BOLD}✔ Credentials successfully saved!{RESET}")
+    print(f"{CYAN}[INFO]{RESET} Stored securely in {file_path} (Salted SHA-256).")
+    print(f"{CYAN}[INFO]{RESET} You must use these credentials to access the Web UI.\n")
+    return user_hashed, f"{salt}:{pass_hashed}"
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type",   "text/html; charset=utf-8")
-        self.send_header("Content-Length", _HTML_LEN)
-        self.send_header("Cache-Control",  "no-store")
-        self.end_headers()
-        self.wfile.write(HTML)
-    def log_message(self, *_): pass
-
-
-# ── Broadcast helpers ─────────────────────────────────────────────────────────
-# Uses asyncio.gather so all clients are written CONCURRENTLY, not serially.
-# Dead clients are pruned after each round — no extra set allocation per call.
-
+        global _EXPECTED_USER_HASH, _EXPECTED_PASS_HASH
+        auth_header = self.headers.get('Authorization')
+        client_address = self.client_address[0]
+        now = time.time()
+        if client_address in _BANNED_IPS:
+            attempts, last_time = _BANNED_IPS[client_address]
+            if attempts >= 3:
+                if now - last_time < 60:
+                    self.send_response(403)
+                    self.end_headers()
+                    self.wfile.write(
+                b"<!DOCTYPE html>"
+                b"<html lang='en'>"
+                b"<head>"
+                b"<meta charset='UTF-8'>"
+                b"<link rel='shortcut icon' href='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAkAAAAJCAYAAADgkQYQAAAALklEQVR42mOAgf+MvP/RMQMyQBLAECeoAEaDCVwKcCnCysfUBQeYiih3PFHhBACeLztdzfuCpwAAAABJRU5ErkJggg=='>"
+                b"<title>IP BANNED!</title>"
+                b"</head>"
+                b"<body bgcolor='#000' style='margin:0;padding:0;height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at center,#1a0000,#000000 70%);font-family:Arial,sans-serif;'>"
+                b"<div style='background:#0a0a0a;padding:50px;border-radius:8px;text-align:center;color:#bbbbbb;box-shadow:0 0 40px rgba(255,0,0,0.6);border:2px solid #550000;'>"
+                b"<h1 style='margin:0 0 20px 0;font-size:38px;color:#ff0000;text-transform:uppercase;letter-spacing:3px;text-shadow:0 0 15px rgba(255,0,0,0.9);'><h1>IP TEMPORARILY BANNED</h1><p>Too many attempts. <h1>Try again in a minute.</h1>"
+                b"<p style='margin:0;font-size:18px;color:#888888;'>Invalid credentials or access denied.<br>Reload and try again.</p>"
+                b"</div>"
+                b"</body>"
+                b"</html>"
+                    )
+                    return
+                else:
+                    _BANNED_IPS.pop(client_address, None)
+                    print(f"\033[91m[AUTH] Failure {attempts}/3 for {client_address}\033[0m")
+        authorized = False
+        print(f"\n[WEB] Incoming connection attempt from {client_address}")
+        if auth_header and auth_header.startswith('Basic '):
+            try:
+                encoded_credentials = auth_header.split(' ')[1]
+                decoded = base64.b64decode(encoded_credentials).decode('utf-8')
+                input_user, input_pass = decoded.split(':', 1)
+                input_user_hash = hashlib.sha256(input_user.encode()).hexdigest()
+                saved_salt, saved_hash = _EXPECTED_PASS_HASH.split(":")
+                test_pass_hash = hashlib.sha256((saved_salt + input_pass).encode()).hexdigest()
+                if (input_user_hash == _EXPECTED_USER_HASH and test_pass_hash == saved_hash):
+                    authorized = True
+                    _BANNED_IPS.pop(client_address, None)
+                    print(f"\033[92m[AUTH] Access GRANTED for user: {input_user}\033[0m")
+                else:
+                    attempts = _BANNED_IPS.get(client_address, [0, 0])[0] + 1
+                    _BANNED_IPS[client_address] = [attempts, time.time()]
+                    print(f"\033[91m[AUTH] Access DENIED: Wrong credentials\033[0m")
+            except Exception as e:
+                print(f"[AUTH] Error decoding credentials: {e}")
+        else:
+            print(f"[WEB] Request from {client_address} without Authorization header.")
+        if authorized:
+            try:
+                html_dinamico = HTML.decode("utf-8").replace(
+                    'data-hash=""', 
+                    f'data-hash="{_CURRENT_FINGERPRINT}"'
+                )
+                payload_final = html_dinamico.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("X-SHA256-Fingerprint", _CURRENT_FINGERPRINT)
+                self.send_header("X-Frame-Options", "DENY")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+                self.send_header("Content-Security-Policy", "upgrade-insecure-requests")
+                self.send_header("Content-Length", str(len(payload_final)))
+                self.send_header("X-Server-Fingerprint", _CURRENT_FINGERPRINT)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload_final)
+            except BrokenPipeError:
+                pass
+        else:
+            time.sleep(1)
+            body = (
+                b"<!DOCTYPE html>"
+                b"<html lang='en'>"
+                b"<head>"
+                b"<meta charset='UTF-8'>"
+                b"<link rel='shortcut icon' href='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAkAAAAJCAYAAADgkQYQAAAALklEQVR42mOAgf+MvP/RMQMyQBLAECeoAEaDCVwKcCnCysfUBQeYiih3PFHhBACeLztdzfuCpwAAAABJRU5ErkJggg=='>"
+                b"<title>ACCESS DENIED!</title>"
+                b"</head>"
+                b"<body bgcolor='#000' style='margin:0;padding:0;height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(circle at center,#1a0000,#000000 70%);font-family:Arial,sans-serif;'>"
+                b"<div style='background:#0a0a0a;padding:50px;border-radius:8px;text-align:center;color:#bbbbbb;box-shadow:0 0 40px rgba(255,0,0,0.6);border:2px solid #550000;'>"
+                b"<h1 style='margin:0 0 20px 0;font-size:38px;color:#ff0000;text-transform:uppercase;letter-spacing:3px;text-shadow:0 0 15px rgba(255,0,0,0.9);'>401 - ACCESS DENIED</h1>"
+                b"<p style='margin:0;font-size:18px;color:#888888;'>Invalid credentials or access denied.<br>Reload and try again.</p>"
+                b"</div>"
+                b"</body>"
+                b"</html>"
+            )
+            try:
+                self.send_response(401)
+                self.send_header('WWW-Authenticate', 'Basic realm="SynchroGaea Secure Login"')
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except BrokenPipeError:
+                pass
+    def log_message(self, *_):
+        pass
+_EXPECTED_USER_HASH, _EXPECTED_PASS_HASH = check_or_create_password()
 async def _broadcast_raw(data: bytes):
     if not _ws_clients:
         return
-    clients = tuple(_ws_clients)          # snapshot — safe during iteration
+    clients = tuple(_ws_clients)
     results = await asyncio.gather(
         *[c.send(data) for c in clients],
         return_exceptions=True
@@ -376,30 +547,24 @@ async def _broadcast_raw(data: bytes):
         if isinstance(r, Exception):
             _ws_clients.discard(c)
 
-
 async def _log(msg: str):
     print(msg, flush=True)
     await _broadcast_raw(_LOG_HDR + msg.encode("utf-8", "replace"))
-
-
-# ── WebSocket handler (browser side) ─────────────────────────────────────────
 async def _ws_handler(websocket):
     _ws_clients.add(websocket)
-    await _log(f"[WS] Browser connected   {websocket.remote_address}")
+    await _log(f"[WSS] Browser connected   {websocket.remote_address}")
     try:
         async for raw in websocket:
             if isinstance(raw, str):
                 try:
                     d = json.loads(raw)
                     if d.get("cmd") == "PING":
-                        pass  # keep-alive, nothing to do
+                        pass
                     else:
                         await _handle_cmd(d)
                 except Exception as ex:
                     await _log(f"[CMD] Error: {ex}")
             elif isinstance(raw, bytes) and len(raw) > 1:
-                # Binary from browser: type byte + payload
-                # Type 2 = mic PCM → forward to Android app as-is
                 ptype = raw[0]
                 if ptype == 2:
                     w = _android_writer
@@ -410,9 +575,7 @@ async def _ws_handler(websocket):
         pass
     finally:
         _ws_clients.discard(websocket)
-        await _log("[WS] Browser disconnected")
-
-
+        await _log("[WSS] Browser disconnected")
 async def _handle_cmd(d: dict):
     w = _android_writer
     if w is None:
@@ -422,21 +585,20 @@ async def _handle_cmd(d: dict):
     if   cmd == "SET_QUALITY": await _to_app(w, 3, f"SET_QUALITY:{d['value']}".encode())
     elif cmd == "VIBRATE":     await _to_app(w, 3, b"VIBRATE")
     elif cmd == "SET_RATE":    await _to_app(w, 3, f"SET_RATE:{d['value']}".encode())
-
-
 async def _to_app(writer: asyncio.StreamWriter, ptype: int, payload: bytes):
     try:
         writer.write(bytes([ptype]) + struct.pack(">I", len(payload)) + payload)
-        # drain() only if the write buffer is getting large, avoids stalling the loop
         if writer.transport.get_write_buffer_size() > 65536:
             await writer.drain()
     except Exception as ex:
         await _log(f"[APP] Send error: {ex}")
-
-
-# ── Self-signed cert ─────────────────────────────────────────────────────────
+def get_fingerprint(crt_path):
+    with open(crt_path, "rb") as f:
+        cert_pem = f.read().decode()
+        b64_data = "".join(cert_pem.splitlines()[1:-1])
+        der_data = base64.b64decode(b64_data)
+        return hashlib.sha256(der_data).hexdigest().lower()
 def _build_ssl_ctx():
-    """Self-signed cert — app uses trust-all so any cert is accepted."""
     try:
         from cryptography import x509
         from cryptography.x509.oid import NameOID
@@ -444,7 +606,6 @@ def _build_ssl_ctx():
         from cryptography.hazmat.primitives.asymmetric import ec 
         from cryptography.hazmat.primitives.asymmetric import rsa
         import datetime
-        #key  = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         key = ec.generate_private_key(ec.SECP256R1())
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, u"synchrogaea")])
         now  = datetime.datetime.now(datetime.timezone.utc)
@@ -465,22 +626,55 @@ def _build_ssl_ctx():
                     serialization.PrivateFormat.TraditionalOpenSSL,
                     serialization.NoEncryption()))
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ctx.check_hostname = False
-        ctx.verify_mode    = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_3
         ctx.load_cert_chain(certfile=crt_path, keyfile=key_path)
-        ctx.set_ciphers('ECDHE-ECDSA-AES128-GCM-SHA256') #for new keys
-        return ctx
+        ctx.options |= ssl.OP_SINGLE_ECDH_USE
+        ctx.options |= ssl.OP_NO_COMPRESSION
+        return ctx, crt_path
     except Exception:
         return None
-
-
-# ── Packet loop (shared by TLS and plain handlers) ───────────────────────────
+_auth_failures = {}
 async def _packet_loop(reader: asyncio.StreamReader,
                        writer: asyncio.StreamWriter, addr, mode: str):
+    addr_ip = addr[0]
+    now = time.time()
+    if addr_ip in _auth_failures:
+        fallimenti, ultimo_timestamp = _auth_failures[addr_ip]
+        if fallimenti >= 3:
+            if now - ultimo_timestamp < 60:
+                print(f"[SECURITY] IP {addr_ip} BANNED (Brute-force protection)")
+                writer.close()
+                return
+            else:
+                del _auth_failures[addr_ip]
     global _android_writer
-    _android_writer = writer
-    await _log(f"[APP] Connected ({mode})   {addr}")
     try:
+        auth_hdr = await reader.readexactly(5)
+        auth_type = auth_hdr[0]
+        auth_len = struct.unpack_from(">I", auth_hdr, 1)[0]
+        auth_payload = await reader.readexactly(auth_len)
+        try:
+            creds = auth_payload.decode('utf-8').split(':', 1)
+            if len(creds) != 2: raise ValueError()
+            u, p = creds
+            u_hash = hashlib.sha256(u.encode()).hexdigest()
+            s_salt, s_hash = _EXPECTED_PASS_HASH.split(":")
+            p_hash = hashlib.sha256((s_salt + p).encode()).hexdigest()
+            if u_hash != _EXPECTED_USER_HASH or p_hash != s_hash:
+                fallimenti, _ = _auth_failures.get(addr_ip, (0, 0))
+                _auth_failures[addr_ip] = [fallimenti + 1, time.time()]
+                print(f"\033[91m[APP] AUTH FAILED ({fallimenti + 1}/3): Invalid credentials from {addr}\033[0m")
+                writer.write(bytes([255]))
+                await writer.drain()
+                return
+        except Exception:
+            print(f"\033[91m[APP] AUTH ERROR: Malformed packet from {addr}\033[0m")
+            return
+        if addr_ip in _auth_failures: del _auth_failures[addr_ip]
+        writer.write(b'\x00')
+        await writer.drain()
+        _android_writer = writer
+        await _log(f"[APP] Connected & Authorized ({mode}) {addr}")
         while True:
             hdr    = await reader.readexactly(5)
             ptype  = hdr[0]
@@ -506,8 +700,6 @@ async def _packet_loop(reader: asyncio.StreamReader,
                 asyncio.create_task(asyncio.to_thread(_write_file, payload, filename))
                 await _log(f"[APP] BLACK_BOX: Video saved -> {filename} ({len(payload)} bytes)")
             elif ptype == 0:
-                # Echo ALIVE back — resets the app's 20s watchdog timer
-                # Format: [0x00][0x00 0x00 0x00 0x05][A L I V E]
                 writer.write(b"\x00\x00\x00\x00\x05ALIVE")
                 await writer.drain()
     except asyncio.IncompleteReadError:
@@ -523,39 +715,36 @@ async def _packet_loop(reader: asyncio.StreamReader,
         except Exception:
             pass
         await _log(f"[APP] Disconnected {addr}")
-
-
 async def _handler_tls(reader, writer):
     await _packet_loop(reader, writer, writer.get_extra_info("peername"), "TLS")
-
 async def _handler_plain(reader, writer):
     await _packet_loop(reader, writer, writer.get_extra_info("peername"), "plain")
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 async def _main():
     try:
         from websockets.server import serve as ws_serve
     except ImportError:
         sys.exit("ERROR: run  pip install websockets  first")
-
-    ssl_ctx    = _build_ssl_ctx()
+    ssl_ctx, crt_path = _build_ssl_ctx()
+    global _CURRENT_FINGERPRINT
+    _CURRENT_FINGERPRINT = get_fingerprint(crt_path)
+    print(f"  ")
+    print(f"{MAGENTA}[SECURITY] Valid Fingerprint: {_CURRENT_FINGERPRINT}{RESET}")
+    print(f"  ")
     os.makedirs("GaeaSavedREC", exist_ok=True)
     global _video_counter
     _video_counter = 0
-    tls_port   = TCP_PORT        # 9999  — TLS
-    plain_port = TCP_PORT + 1    # 10000 — plain fallback
-
-    # ── WebSocket ─────────────────────────────────────────────────────────────
+    tls_port   = TCP_PORT
+    plain_port = TCP_PORT + 1
     ws_srv = await ws_serve(_ws_handler, "0.0.0.0", WS_PORT,
+                            ssl=ssl_ctx,
                             max_size=MAX_PAYLOAD, compression=None,
                             ping_interval=20, ping_timeout=60)
-
-    # ── HTTP ─────────────────────────────────────────────────────────────────
     httpd = HTTPServer(("0.0.0.0", HTTP_PORT), _Handler)
+    web_proto = "http"
+    if ssl_ctx:
+        httpd.socket = ssl_ctx.wrap_socket(httpd.socket, server_side=True)
+        web_proto = "https"
     threading.Thread(target=httpd.serve_forever, daemon=True, name="http").start()
-
-    # ── TLS server on 9999 ────────────────────────────────────────────────────
     servers = []
     if ssl_ctx:
         tls_srv = await asyncio.start_server(
@@ -566,31 +755,32 @@ async def _main():
         tls_info = f"TLS  :9999  plain :10000"
     else:
         tls_info = "TLS disabled (pip install cryptography)"
-
-    # ── Plain server on 10000 (or 9999 if no TLS) ────────────────────────────
     plain_srv = await asyncio.start_server(
         _handler_plain, "0.0.0.0", plain_port if ssl_ctx else tls_port,
         limit=TCP_READER_LIMIT, backlog=8
     )
     servers.append(plain_srv)
-
+    import socket
+    for srv in servers:
+        for sock in srv.sockets:
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
     print("   ")
-    print("╔══════════════════════════════════════════════════╗")
-    print("║           SynchroGaea Server  v4.4               ║")
-    print("╠══════════════════════════════════════════════════╣")
+    print(f"{GREEN}{BOLD}╔══════════════════════════════════════════════════╗{RESET}")
+    print(f"{GREEN}{BOLD}║           SynchroGaea Server  v4.4               ║{RESET}")
+    print(f"{GREEN}{BOLD}╠══════════════════════════════════════════════════╣{RESET}")
     if ssl_ctx:
-        print(f"║  Android TLS   →  0.0.0.0:{tls_port}  (try first)      ║")
-        print(f"║  Android plain →  0.0.0.0:{plain_port} (fallback)       ║")
-        print(f"║  App field: YOUR_IP:{tls_port};YOUR_IP:{plain_port}           ║")
+        print(f"{MAGENTA}║  Android TLS   →  0.0.0.0:{tls_port}  (try first)      ║{RESET}")
+        print(f"{CYAN}║  Android plain →  0.0.0.0:{plain_port} (fallback)       ║{RESET}")
+        print(f"{YELLOW}║  App field: YOUR_IP:{tls_port};YOUR_IP:{plain_port}           ║{RESET}")
     else:
-        print(f"║  Android plain →  0.0.0.0:{tls_port}                   ║")
-    print(f"║  Web UI        →  http://0.0.0.0:{HTTP_PORT}            ║")
-    print(f"║  WebSocket     →  0.0.0.0:{WS_PORT}                   ║")
-    print("╠══════════════════════════════════════════════════╣")
-    print(f"║  Open browser: http://127.0.0.1:{HTTP_PORT}             ║")
-    print("╚══════════════════════════════════════════════════╝")
+        print(f"{CYAN}║  Android plain →  0.0.0.0:{tls_port}                   ║{RESET}")
+    print(f"{CYAN}║  Web UI        →  https://0.0.0.0:{HTTP_PORT}           ║{RESET}")
+    print(f"{CYAN}║  WebSocket     →  0.0.0.0:{WS_PORT}                   ║{RESET}")
+    print(f"{GREEN}{BOLD}╠══════════════════════════════════════════════════╣{RESET}")
+    print(f"{YELLOW}║  Open browser: https://127.0.0.1:{HTTP_PORT}            ║{RESET}")
+    print(f"{GREEN}{BOLD}╚══════════════════════════════════════════════════╝{RESET}")
     print("   ")
-
     all_srv = [ws_srv] + servers
     for s in servers:
         await s.__aenter__()
@@ -599,8 +789,6 @@ async def _main():
             ws_srv.serve_forever(),
             *[s.serve_forever() for s in servers]
         )
-
-
 if __name__ == "__main__":
     try:
         asyncio.run(_main())
