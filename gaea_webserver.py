@@ -21,6 +21,13 @@ import hashlib
 import getpass
 import base64
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from datetime import datetime
+
+class _EventTime:
+    def __str__(self):
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+EVENT_TIME = _EventTime()
 
 RESET   = "\033[0m"
 BOLD    = "\033[1m"
@@ -461,9 +468,9 @@ class _Handler(BaseHTTPRequestHandler):
                     return
                 else:
                     _BANNED_IPS.pop(client_address, None)
-                    print(f"\033[91m[AUTH] Failure {attempts}/3 for {client_address}\033[0m")
+                    print(f"\033[91m{EVENT_TIME} >>> [AUTH] Failure {attempts}/3 for {client_address}\033[0m")
         authorized = False
-        print(f"\n[WEB] Incoming connection attempt from {client_address}")
+        print(f"\n{EVENT_TIME} >>> [WEB] Incoming connection attempt from {client_address}")
         if auth_header and auth_header.startswith('Basic '):
             try:
                 encoded_credentials = auth_header.split(' ')[1]
@@ -475,15 +482,15 @@ class _Handler(BaseHTTPRequestHandler):
                 if (input_user_hash == _EXPECTED_USER_HASH and test_pass_hash == saved_hash):
                     authorized = True
                     _BANNED_IPS.pop(client_address, None)
-                    print(f"\033[92m[AUTH] Access GRANTED for user: {input_user}\033[0m")
+                    print(f"\033[92m{EVENT_TIME} >>> [AUTH] Access GRANTED for user: {input_user}\033[0m")
                 else:
                     attempts = _BANNED_IPS.get(client_address, [0, 0])[0] + 1
                     _BANNED_IPS[client_address] = [attempts, time.time()]
-                    print(f"\033[91m[AUTH] Access DENIED: Wrong credentials\033[0m")
+                    print(f"\033[91m{EVENT_TIME} >>> [AUTH] Access DENIED: Wrong credentials\033[0m")
             except Exception as e:
-                print(f"[AUTH] Error decoding credentials: {e}")
+                print(f"{EVENT_TIME} >>> [AUTH] Error decoding credentials: {e}")
         else:
-            print(f"[WEB] Request from {client_address} without Authorization header.")
+            print(f"{EVENT_TIME} >>> [WEB] Request from {client_address} without Authorization header.")
         if authorized:
             try:
                 html_dinamico = HTML.decode("utf-8").replace(
@@ -552,7 +559,7 @@ async def _log(msg: str):
     await _broadcast_raw(_LOG_HDR + msg.encode("utf-8", "replace"))
 async def _ws_handler(websocket):
     _ws_clients.add(websocket)
-    await _log(f"[WSS] Browser connected   {websocket.remote_address}")
+    await _log(f"{EVENT_TIME} >>> [WSS] Browser connected   {websocket.remote_address}")
     try:
         async for raw in websocket:
             if isinstance(raw, str):
@@ -563,7 +570,7 @@ async def _ws_handler(websocket):
                     else:
                         await _handle_cmd(d)
                 except Exception as ex:
-                    await _log(f"[CMD] Error: {ex}")
+                    await _log(f"{EVENT_TIME} >>> [CMD] Error: {ex}")
             elif isinstance(raw, bytes) and len(raw) > 1:
                 ptype = raw[0]
                 if ptype == 2:
@@ -575,11 +582,11 @@ async def _ws_handler(websocket):
         pass
     finally:
         _ws_clients.discard(websocket)
-        await _log("[WSS] Browser disconnected")
+        await _log(f"{EVENT_TIME} >>> [WSS] Browser disconnected")
 async def _handle_cmd(d: dict):
     w = _android_writer
     if w is None:
-        await _log("[CMD] No app connected")
+        await _log(f"{EVENT_TIME} >>> [CMD] No app connected")
         return
     cmd = d.get("cmd", "")
     if   cmd == "SET_QUALITY": await _to_app(w, 3, f"SET_QUALITY:{d['value']}".encode())
@@ -591,7 +598,7 @@ async def _to_app(writer: asyncio.StreamWriter, ptype: int, payload: bytes):
         if writer.transport.get_write_buffer_size() > 65536:
             await writer.drain()
     except Exception as ex:
-        await _log(f"[APP] Send error: {ex}")
+        await _log(f"{EVENT_TIME} >>> [APP] Send error: {ex}")
 def get_fingerprint(crt_path):
     with open(crt_path, "rb") as f:
         cert_pem = f.read().decode()
@@ -632,7 +639,7 @@ def _build_ssl_ctx():
         ctx.options |= ssl.OP_NO_COMPRESSION
         return ctx, crt_path
     except Exception:
-        return None
+        return None, None #AnticrashSSL
 _auth_failures = {}
 async def _packet_loop(reader: asyncio.StreamReader,
                        writer: asyncio.StreamWriter, addr, mode: str):
@@ -642,7 +649,7 @@ async def _packet_loop(reader: asyncio.StreamReader,
         fallimenti, ultimo_timestamp = _auth_failures[addr_ip]
         if fallimenti >= 3:
             if now - ultimo_timestamp < 60:
-                print(f"[SECURITY] IP {addr_ip} BANNED (Brute-force protection)")
+                print(f"{EVENT_TIME} >>> [SECURITY] IP {addr_ip} BANNED (Brute-force protection)")
                 writer.close()
                 return
             else:
@@ -663,29 +670,29 @@ async def _packet_loop(reader: asyncio.StreamReader,
             if u_hash != _EXPECTED_USER_HASH or p_hash != s_hash:
                 fallimenti, _ = _auth_failures.get(addr_ip, (0, 0))
                 _auth_failures[addr_ip] = [fallimenti + 1, time.time()]
-                print(f"\033[91m[APP] AUTH FAILED ({fallimenti + 1}/3): Invalid credentials from {addr}\033[0m")
+                print(f"\033[91m{EVENT_TIME} >>> [APP] AUTH FAILED ({fallimenti + 1}/3): Invalid credentials from {addr}\033[0m")
                 writer.write(bytes([255]))
                 await writer.drain()
                 return
         except Exception:
-            print(f"\033[91m[APP] AUTH ERROR: Malformed packet from {addr}\033[0m")
+            print(f"\033[91m{EVENT_TIME} >>> [APP] AUTH ERROR: Malformed packet from {addr}\033[0m")
             return
         if addr_ip in _auth_failures: del _auth_failures[addr_ip]
         writer.write(b'\x00')
         await writer.drain()
         _android_writer = writer
-        await _log(f"[APP] Connected & Authorized ({mode}) {addr}")
+        await _log(f"{EVENT_TIME} >>> [APP] Connected & Authorized ({mode}) {addr}")
         while True:
             hdr    = await reader.readexactly(5)
             ptype  = hdr[0]
             length = struct.unpack_from(">I", hdr, 1)[0]
             if length > MAX_PAYLOAD:
-                await _log(f"[APP] Oversized packet {length}B — dropping")
+                await _log(f"{EVENT_TIME} >>> [APP] Oversized packet {length}B — dropping")
                 break
             payload = await reader.readexactly(length) if length else b""
             if   ptype == 1 and payload: await _broadcast_raw(_FRAME_HDR + payload)
             elif ptype == 2 and payload: await _broadcast_raw(_AUDIO_HDR + payload)
-            elif ptype == 3 and payload: await _log("[APP] CMD: " + payload.decode("utf-8", "replace"))
+            elif ptype == 3 and payload: await _log(f"{EVENT_TIME} >>> [APP] CMD: " + payload.decode("utf-8", "replace"))
             elif ptype == 4 and payload:
                 global _video_counter
                 _video_counter += 1
@@ -698,14 +705,14 @@ async def _packet_loop(reader: asyncio.StreamReader,
                     with open(name, "wb") as f:
                         f.write(data)
                 asyncio.create_task(asyncio.to_thread(_write_file, payload, filename))
-                await _log(f"[APP] BLACK_BOX: Video saved -> {filename} ({len(payload)} bytes)")
+                await _log(f"{EVENT_TIME} >>> [APP] BLACK_BOX: Video saved -> {filename} ({len(payload)} bytes)")
             elif ptype == 0:
                 writer.write(b"\x00\x00\x00\x00\x05ALIVE")
                 await writer.drain()
     except asyncio.IncompleteReadError:
         pass
     except Exception as ex:
-        await _log(f"[APP] Error: {ex}")
+        await _log(f"{EVENT_TIME} >>> [APP] Error: {ex}")
     finally:
         if _android_writer is writer:
             _android_writer = None
@@ -714,7 +721,7 @@ async def _packet_loop(reader: asyncio.StreamReader,
             await writer.wait_closed()
         except Exception:
             pass
-        await _log(f"[APP] Disconnected {addr}")
+        await _log(f"{EVENT_TIME} >>> [APP] Disconnected {addr}")
 async def _handler_tls(reader, writer):
     await _packet_loop(reader, writer, writer.get_extra_info("peername"), "TLS")
 async def _handler_plain(reader, writer):
@@ -726,7 +733,10 @@ async def _main():
         sys.exit("ERROR: run  pip install websockets  first")
     ssl_ctx, crt_path = _build_ssl_ctx()
     global _CURRENT_FINGERPRINT
-    _CURRENT_FINGERPRINT = get_fingerprint(crt_path)
+    if crt_path:
+        _CURRENT_FINGERPRINT = get_fingerprint(crt_path)
+    else:
+        _CURRENT_FINGERPRINT = "NO_TLS"
     print(f"  ")
     print(f"{MAGENTA}[SECURITY] Valid Fingerprint: {_CURRENT_FINGERPRINT}{RESET}")
     print(f"  ")
@@ -793,4 +803,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(_main())
     except KeyboardInterrupt:
-        print("\nServer stopped.")
+        print(f"\n{EVENT_TIME} >>> Server stopped.")
