@@ -289,6 +289,18 @@ class SService : LifecycleService() {
                         val bos = java.io.BufferedOutputStream(newSocket.getOutputStream(), 16384)
                         outputStream = DataOutputStream(bos)
                         val inputStream = DataInputStream(newSocket.getInputStream())
+                        val prefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
+                        val specificAuth = prefs.getString("auth_$serverAddr", "admin:password") ?: "admin:password"
+                        sendData(0, specificAuth.toByteArray(Charsets.UTF_8))
+                        val response = inputStream.read()
+                        if (response == 255) {
+                            broadcastLog("AUTH_ERR: Incorrect password for $serverAddr")
+                            prefs.edit().remove("auth_$serverAddr").apply()
+                            val intent = Intent("GAEA_AUTH_RETRY")
+                            intent.putExtra("SERVER_IP", serverAddr)
+                            sendBroadcast(intent)
+                            throw Exception("AUTH_FAILED")
+                        }
                         broadcastLog("NET: UPLINK_ESTABLISHED!")
                         Handler(Looper.getMainLooper()).post {
                             initIncomingAudio()

@@ -57,6 +57,20 @@ class MainActivity : Activity() {
         } else {
             registerReceiver(logReceiver, filter)
         }
+        val authFilter = IntentFilter("GAEA_AUTH_RETRY")
+        val authRetryReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                val failedIp = intent?.getStringExtra("SERVER_IP")
+                if (failedIp != null) {
+                    configureServersAuth(listOf(failedIp), 0)
+                }
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(authRetryReceiver, authFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            registerReceiver(authRetryReceiver, authFilter)
+        }
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val lastSavedIp = prefs.getString(KEY_IP, "192.168.1.220:9999")
         etFps?.setText(prefs.getLong("cam_fps", 7L).toString())
@@ -127,10 +141,75 @@ class MainActivity : Activity() {
                     apply()
                 }
                 logTerminal("MULTI_LINK_INIT: ${servers.size} TARGETS")
-                initiateConnection(rawInput)
+                //initiateConnection(rawInput)
+                configureServersAuth(servers, 0)
             } else {
                 logTerminal("SYNTAX_ERROR: USE IP:PORT ; IP:PORT")
             }
+        }
+    }
+    private fun configureServersAuth(servers: List<String>, index: Int) {
+        if (index >= servers.size) {
+            val rawInput = findViewById<EditText>(R.id.etAddress)?.text?.toString() ?: ""
+            logTerminal("MULTI_LINK_READY: Dispatching...")
+            initiateConnection(rawInput)
+            return
+        }
+        val currentServer = servers[index]
+        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.contains("auth_$currentServer")) {
+            logTerminal("AUTH_VERIFIED: $currentServer")
+            configureServersAuth(servers, index + 1)
+            return
+        }
+        runOnUiThread {
+            val builder = android.app.AlertDialog.Builder(this, android.app.AlertDialog.THEME_DEVICE_DEFAULT_DARK)
+            val title = TextView(this).apply {
+                text = " AUTH_REQUIRED > $currentServer "
+                setPadding(30, 40, 30, 40)
+                textSize = 18f
+                setTextColor(android.graphics.Color.parseColor("#00FF41"))
+                setBackgroundColor(android.graphics.Color.parseColor("#111111"))
+            }
+            builder.setCustomTitle(title)
+            val layout = android.widget.LinearLayout(this).apply {
+                orientation = android.widget.LinearLayout.VERTICAL
+                setPadding(50, 40, 50, 20)
+                setBackgroundColor(android.graphics.Color.parseColor("#111111"))
+            }
+            val inputUser = EditText(this).apply {
+                hint = "LOGIN_ID"
+                setHintTextColor(android.graphics.Color.parseColor("#006400"))
+                setTextColor(android.graphics.Color.parseColor("#00FF41"))
+                background.setColorFilter(android.graphics.Color.parseColor("#00FF41"), android.graphics.PorterDuff.Mode.SRC_ATOP)
+            }
+            val inputPass = EditText(this).apply {
+                hint = "ACCESS_KEY"
+                setHintTextColor(android.graphics.Color.parseColor("#006400"))
+                setTextColor(android.graphics.Color.parseColor("#00FF41"))
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+                background.setColorFilter(android.graphics.Color.parseColor("#00FF41"), android.graphics.PorterDuff.Mode.SRC_ATOP)
+            }
+            layout.addView(inputUser)
+            layout.addView(inputPass)
+            builder.setView(layout)
+            builder.setPositiveButton("VALIDATE_&_SAVE") { _, _ ->
+                val user = inputUser.text.toString().trim()
+                val pass = inputPass.text.toString().trim()
+                if (user.isNotEmpty() && pass.isNotEmpty()) {
+                    prefs.edit().putString("auth_$currentServer", "$user:$pass").apply()
+                    logTerminal("CREDENTIALS_LOCKED: $currentServer")
+                    configureServersAuth(servers, index + 1)
+                } else {
+                    android.widget.Toast.makeText(this, "EMPTY_CREDENTIALS_REJECTED", android.widget.Toast.LENGTH_SHORT).show()
+                    configureServersAuth(servers, index)
+                }
+            }
+            builder.setCancelable(false)
+            val dialog = builder.create()
+            dialog.show()
+            dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setTextColor(android.graphics.Color.parseColor("#00FF41"))
+            dialog.window?.setBackgroundDrawableResource(android.R.color.black)
         }
     }
     private fun initiateConnection(fullAddr: String) {
