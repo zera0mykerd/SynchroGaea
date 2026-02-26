@@ -65,6 +65,8 @@ class SService : LifecycleService() {
     private var isRunning = false
     private var currentTarget: String = ""
     private var socket: Socket? = null
+    private var mediaCodec: MediaCodec? = null
+    private var encoderThread: Thread? = null
     private var outputStream: DataOutputStream? = null
     private val cameraExecutor = Executors.newSingleThreadExecutor()
     private var audioRecord: AudioRecord? = null
@@ -87,6 +89,10 @@ class SService : LifecycleService() {
     private var blackBoxDurationMs: Long = 10000L
     private var wakeLock: PowerManager.WakeLock? = null
     private var locationManager: LocationManager? = null
+    private val sendLock = Any()
+    private var cameraControl: CameraControl? = null
+    private var torchOn = false
+    private var isSyncInProgress = false
     companion object {
         const val LOG_ACTION = "com.mykerd.synchrogaea.LOG_MSG"
         const val EXTRA_MSG = "message"
@@ -266,9 +272,10 @@ class SService : LifecycleService() {
         val threadTarget = serverListRaw
         thread(start = true, name = "GaeaNetThread") {
             val servers = serverListRaw.split(";").map { it.trim() }.filter { it.contains(":") }
-            while (isRunning && currentTarget == threadTarget) {
+            while (currentTarget == threadTarget) {
                 for (serverAddr in servers) {
-                    if (!isRunning || currentTarget != threadTarget) break
+                    if (currentTarget != threadTarget) break
+                    isRunning = true
                     var currentSocketInstance: Socket? = null
                     try {
                         val lastColon = serverAddr.lastIndexOf(':')
@@ -280,14 +287,12 @@ class SService : LifecycleService() {
                         newSocket.tcpNoDelay = true
                         newSocket.keepAlive = true
                         newSocket.soTimeout = 20000
-                        newSocket.trafficClass = 0x10 or 0x08
-                        newSocket.sendBufferSize = 256 * 1024
-                        newSocket.receiveBufferSize = 256 * 1024
+                        newSocket.trafficClass = 0xB8
+                        newSocket.sendBufferSize = 32 * 1024 /* Default 128 */
+                        newSocket.receiveBufferSize = 64 * 1024 /* Default 256 */
                         socket = newSocket
-                        newSocket.setPerformancePreferences(0, 1, 2)
-                        newSocket.sendBufferSize = 128 * 1024
-                        val bos = java.io.BufferedOutputStream(newSocket.getOutputStream(), 16384)
-                        outputStream = DataOutputStream(bos)
+                        newSocket.setPerformancePreferences(0, 2, 1)
+                        outputStream = DataOutputStream(newSocket.getOutputStream())
                         val inputStream = DataInputStream(newSocket.getInputStream())
                         val prefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
                         val specificAuth = prefs.getString("auth_$serverAddr", "admin:password") ?: "admin:password"
@@ -304,6 +309,8 @@ class SService : LifecycleService() {
                         broadcastLog("NET: UPLINK_ESTABLISHED!")
                         Handler(Looper.getMainLooper()).post {
                             initIncomingAudio()
+                            isRunning = true
+                            startCameraEngine()
                             if (!isRecActive) {
                                 startAudioCapture()
                             } else {
@@ -313,7 +320,7 @@ class SService : LifecycleService() {
                         thread(start = true, name = "GaeaReceiveThread") {
                             try {
                                 var audioBuffer = ByteArray(65536)
-                                while (isRunning && !newSocket.isClosed && currentTarget == threadTarget) {
+                                while (!newSocket.isClosed && currentTarget == threadTarget) {
                                     val type = inputStream.read().takeIf { it != -1 } ?: break
                                     val len = inputStream.readInt()
                                     if (len in 1..1000000) {
@@ -334,38 +341,40 @@ class SService : LifecycleService() {
                                     }
                                 }
                             } catch (e: Exception) {
-                                if (isRunning && currentTarget == threadTarget) {
-                                    broadcastLog("RCV_ERR: ${e.localizedMessage}")
-                                }
+                                broadcastLog("RCV_ERR: ${e.localizedMessage}")
                             } finally {
                                 try { inputStream.close() } catch (_: Exception) {}
                                 try { newSocket.close() } catch (_: Exception) {}
                             }
                         }
-                        while (isRunning && !newSocket.isClosed && currentTarget == threadTarget) {
+                        while (!newSocket.isClosed && currentTarget == threadTarget) {
                             val currentTime = System.currentTimeMillis()
                             val silentTime = currentTime - lastDataSentTime
                             if (silentTime > 20000) {
-                                broadcastLog("WATCHDOG: CRITICAL_FREEZE! Hard resetting engines...")
+                                broadcastLog("WATCHDOG: RESETTING...")
                                 try {
                                     newSocket.close()
                                     outputStream?.close()
                                 } catch (_: Exception) {}
-                                stopEngines()
                                 isRunning = true
                                 lastDataSentTime = System.currentTimeMillis()
                                 Handler(Looper.getMainLooper()).postDelayed({
-                                    if (isRunning) {
-                                        broadcastLog("WATCHDOG: Re-spawning Camera & Audio...")
+                                    if (currentTarget == threadTarget) {
+                                        broadcastLog("WATCHDOG: Recovering Engines...")
                                         startCameraEngine()
-                                        if (!isRecActive) {
-                                            startAudioCapture()
-                                        }
+                                        if (!isRecActive) startAudioCapture()
                                     }
                                 }, 1000)
                                 break
                             }
                             sendData(0, "ALIVE".toByteArray())
+                            try {
+                                val batteryStatus: Intent? = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                                val level = batteryStatus?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+                                val scale = batteryStatus?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+                                val batteryPct = if (level != -1 && scale != -1) (level * 100 / scale.toInt()).toInt() else 0
+                                sendData(130, batteryPct.toString().toByteArray())
+                            } catch (_: Exception) {}
                             refreshNotification()
                             try {
                                 Thread.sleep(5000)
@@ -374,7 +383,7 @@ class SService : LifecycleService() {
                             }
                         }
                     } catch (e: Exception) {
-                        if (isRunning && currentTarget == threadTarget) {
+                        if (currentTarget == threadTarget) {
                             broadcastLog("NET_ERR on $serverAddr: ${e.localizedMessage}")
                             broadcastLog("RETRYING_IN_7_SECONDS...")
                             Thread.sleep(7000)
@@ -384,9 +393,9 @@ class SService : LifecycleService() {
                         try { currentSocketInstance?.close() } catch (_: Exception) {}
                         socket = null
                         outputStream = null
-
-                        if (isRunning && currentTarget == threadTarget) {
-                            broadcastLog("NET: TARGET_LOST/NEXT_SERVER...")
+                        if (currentTarget == threadTarget) {
+                            broadcastLog("NET: DISCONNECTED. Waiting 7s...")
+                            Thread.sleep(7000)
                         }
                     }
                 }
@@ -397,25 +406,50 @@ class SService : LifecycleService() {
     }
     @Synchronized
     private fun sendData(type: Int, data: ByteArray) {
-        val currentSocket = socket
-        val stream = outputStream
-        if (currentSocket == null || stream == null || !currentSocket.isConnected || currentSocket.isClosed) {
-            return
-        }
-        try {
-            stream.writeByte(type)
-            stream.writeInt(data.size)
-            stream.write(data)
-            stream.flush()
-            lastDataSentTime = System.currentTimeMillis()
-        } catch (e: Exception) {
+        val stream = outputStream ?: return
+        val s = socket
+        if (s == null || !s.isConnected || s.isClosed) return
+        thread {
             try {
-                socket?.close()
-            } catch (_: Exception) { }
-            outputStream = null
-            socket = null
-            broadcastLog("NET_SEND_ERR: Connection reset")
+                synchronized(sendLock) {
+                    stream.writeByte(type)
+                    stream.writeInt(data.size)
+                    stream.write(data)
+                    stream.flush()
+                }
+                lastDataSentTime = System.currentTimeMillis()
+            } catch (e: Exception) {
+                Log.e("GAEA", "Send failed, closing socket: ${e.message}")
+                synchronized(sendLock) {
+                    try {
+                        socket?.close()
+                    } catch (_: Exception) { }
+                    socket = null
+                    outputStream = null
+                }
+                broadcastLog("RCV_ERR: Socket Reset")
+                if (isRunning) {
+                    Handler(Looper.getMainLooper()).post { stopEngines() }
+                }
+            }
         }
+    }
+    private fun calculateOptimalBitrate(width: Int, height: Int, userQual: Int): Int {
+        val numPixels = width * height
+        val qualityMultiplier = userQual.coerceIn(1, 100) / 50.0
+        val bpp = when {
+            height >= 2160 -> 0.19 // 4K
+            height >= 1440 -> 0.17 // 2K
+            height >= 1080 -> 0.15 // 1080p
+            height >= 720  -> 0.13 // 720p
+            height >= 480  -> 0.12 // 480p
+            height >= 360  -> 0.15 // 360p
+            height >= 240  -> 0.18 // 240p
+            else           -> 0.25 // 144p
+        }
+        val baseBitrate = (numPixels * bpp * 30).toInt()
+        val finalBitrate = (baseBitrate * qualityMultiplier).toInt()
+        return finalBitrate.coerceIn(300_000, 50_000_000)
     }
     private fun startCameraEngine() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
@@ -424,109 +458,122 @@ class SService : LifecycleService() {
             try {
                 val cameraProvider = cameraProviderFuture.get()
                 val prefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
-                val targetFps = prefs.getLong("cam_fps", 7L)
                 val resStr = prefs.getString("cam_res", "1280x720") ?: "1280x720"
                 val resParts = resStr.split("x")
-                val targetWidth = if (resParts.size == 2) resParts[0].toIntOrNull() ?: 1280 else 1280
-                val targetHeight = if (resParts.size == 2) resParts[1].toIntOrNull() ?: 720 else 720
+                val rawWidth = resParts[0].toIntOrNull() ?: 1280
+                val rawHeight = resParts[1].toIntOrNull() ?: 720
+                val targetWidth = (rawWidth / 16) * 16
+                val targetHeight = (rawHeight / 16) * 16
+                val userQuality = prefs.getInt("cam_qual", 30)
+                val targetFps = prefs.getLong("cam_fps", 7L)
                 val currentFrameInterval = 1000L / targetFps
-                val analyzerLogic = ImageAnalysis.Analyzer { imageProxy ->
-                    try {
-                        if (isRecActive) {
-                            imageProxy.close()
-                            return@Analyzer
-                        }
-                        val currentTime = System.currentTimeMillis()
-                        val currentSocketStream = outputStream
-                        if (isRunning && currentSocketStream != null && (currentTime - lastFrameTime) >= currentFrameInterval) {
-                            val currentPrefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
-                            this.jpegQuality = currentPrefs.getInt("cam_qual", 30)
-
-                            val jpegBytes = imageToJpeg(imageProxy)
-                            if (jpegBytes.isNotEmpty()) {
-                                sendData(1, jpegBytes)
-                                lastFrameTime = currentTime
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.e("GAEA", "Error analyzer: ${e.message}")
-                    } finally {
-                        imageProxy.close()
+                val targetBitrate = calculateOptimalBitrate(targetWidth, targetHeight, userQuality)
+                mediaCodec?.stop()
+                mediaCodec?.release()
+                val format = MediaFormat.createVideoFormat("video/avc", targetWidth, targetHeight)
+                format.setInteger(MediaFormat.KEY_COLOR_FORMAT, 2130708361)
+                format.setInteger(MediaFormat.KEY_BIT_RATE, targetBitrate)
+                format.setInteger(MediaFormat.KEY_FRAME_RATE, 30)
+                format.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                format.setInteger("prepend-sps-pps-to-idr-frames", 1)
+                format.setInteger("bitrate-mode", if (targetHeight < 720) 1 else 2)
+                format.setInteger("color-standard", 1)
+                format.setInteger("color-transfer", 3)
+                format.setInteger("color-range", 2)
+                when {
+                    targetHeight >= 1080 -> {
+                        format.setInteger("profile", 8)
+                        format.setInteger("level", if (targetHeight >= 2160) 32768 else 1024)
+                    }
+                    targetHeight >= 720 -> {
+                        format.setInteger("profile", 2)
+                        format.setInteger("level", 512)
+                    }
+                    else -> {
+                        format.setInteger("profile", 1)
+                        format.setInteger("level", 128)
                     }
                 }
+                val codec = MediaCodec.createEncoderByType("video/avc")
+                codec.setCallback(object : MediaCodec.Callback() {
+                    override fun onOutputBufferAvailable(c: MediaCodec, index: Int, info: MediaCodec.BufferInfo) {
+                        val buffer = c.getOutputBuffer(index)
+                        if (buffer != null && info.size > 0 && isRunning && !isRecActive) {
+                            val outData = ByteArray(info.size)
+                            buffer.get(outData)
+                            sendData(1, outData)
+                        }
+                        c.releaseOutputBuffer(index, false)
+                    }
+                    override fun onInputBufferAvailable(c: MediaCodec, index: Int) {}
+                    override fun onError(c: MediaCodec, e: MediaCodec.CodecException) {}
+                    override fun onOutputFormatChanged(c: MediaCodec, f: MediaFormat) {}
+                })
+                codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                val codecInputSurface = codec.createInputSurface()
+                codec.start()
+                this.mediaCodec = codec
                 val imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(targetWidth, targetHeight))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                     .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                     .build()
-                imageAnalysis.setAnalyzer(cameraExecutor, analyzerLogic)
-                val targetQual = prefs.getInt("cam_qual", 30)
-                val recorder = Recorder.Builder()
-                    .setQualitySelector(QualitySelector.from(Quality.SD))
-                    .setTargetVideoEncodingBitRate(targetQual * 10000)
-                    .build()
-                this.videoCapture = VideoCapture.withOutput(recorder)
-                val preview = Preview.Builder()
-                    .setTargetResolution(Size(targetWidth, targetHeight))
-                    .build()
-                val dummySurfaceTexture = android.graphics.SurfaceTexture(0)
-                preview.setSurfaceProvider { request ->
-                    request.provideSurface(android.view.Surface(dummySurfaceTexture), cameraExecutor) {}
+                imageAnalysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                    try {
+                        val currentTime = System.currentTimeMillis()
+                        if (isRunning && (currentTime - lastFrameTime) >= currentFrameInterval) {
+                            this.jpegQuality = userQuality
+                            val jpegBytes = imageToJpeg(imageProxy)
+                            if (jpegBytes.isNotEmpty()) {
+                                lastFrameTime = currentTime
+                            }
+                        }
+                    } finally { imageProxy.close() }
                 }
+                val recQual = when {
+                    targetHeight >= 2160 -> Quality.UHD
+                    targetHeight >= 1080 -> Quality.FHD
+                    targetHeight >= 720  -> Quality.HD
+                    else -> Quality.SD
+                }
+                this.videoCapture = VideoCapture.withOutput(Recorder.Builder()
+                    .setQualitySelector(QualitySelector.from(recQual))
+                    .setTargetVideoEncodingBitRate(targetBitrate)
+                    .build())
+                if (isRecActive) {
+                    isRecModeActive()
+                }
+                val preview = Preview.Builder().setTargetResolution(Size(targetWidth, targetHeight)).build()
+                preview.setSurfaceProvider(cameraExecutor) { request ->
+                    request.provideSurface(codecInputSurface, cameraExecutor) {}
+                }
+                val cameraSelector = CameraSelector.Builder().requireLensFacing(lensFacing).build()
                 cameraProvider.unbindAll()
-                val cameraSelector = CameraSelector.Builder()
-                    .requireLensFacing(lensFacing)
-                    .build()
+
                 try {
-                    if (lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
-                        cameraProvider.bindToLifecycle(
-                            this,
-                            cameraSelector,
-                            preview,
-                            imageAnalysis,
-                            this.videoCapture
-                        )
-                        broadcastLog("CAMERA: UPLINK_READY + BLACK_BOX_ARMED")
-                    }
-                    if (isRecActive) {
-                        isRecModeActive()
-                    }
-                } catch (e: Exception) {
-                    broadcastLog("CAM_WARN: Multi-mode failed, trying fallback 480p...")
-                    cameraProvider.unbindAll()
-                    val fallbackAnalysis = ImageAnalysis.Builder()
-                        .setTargetResolution(Size(640, 480))
-                        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
-                        .build()
-                    fallbackAnalysis.setAnalyzer(cameraExecutor, analyzerLogic)
-                    cameraProvider.bindToLifecycle(
-                        this,
-                        cameraSelector,
-                        preview,
-                        fallbackAnalysis,
-                        this.videoCapture
+                    val camera = cameraProvider.bindToLifecycle(
+                        this, cameraSelector, preview, imageAnalysis, this.videoCapture
                     )
-                    broadcastLog("CAMERA: UPLINK_READY (Fallback 480p)")
+                    this.cameraControl = camera.cameraControl
+                    broadcastLog("SYSTEM: FULL_MODE_ACTIVE (${targetWidth}x${targetHeight})")
+                } catch (e: Exception) {
+                    broadcastLog("HW_LIMIT: Entering Safe Mode...")
+                    cameraProvider.unbindAll()
                     if (isRecActive) {
-                        isRecModeActive()
+                        mediaCodec?.stop(); mediaCodec?.release(); mediaCodec = null
+                        val simplePreview = Preview.Builder().build()
+                        cameraProvider.bindToLifecycle(this, cameraSelector, simplePreview, this.videoCapture)
+                        broadcastLog("SYSTEM: REC_PRIORITY_SAFE_MODE")
+                    } else {
+                        cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis)
+                        broadcastLog("SYSTEM: STREAM_PRIORITY_SAFE_MODE")
                     }
                 }
             } catch (e: Exception) {
-                broadcastLog("CAM_CRITICAL_ERR: ${e.message}")
-                Log.e("GAEA", "All camera modes failed: ${e.localizedMessage}")
+                broadcastLog("FATAL_ERR: ${e.message}")
+                Log.e("GAEA", "Engine Crash", e)
             }
         }, ContextCompat.getMainExecutor(this))
-    }
-    fun switchCamera() {
-        lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) {
-            CameraSelector.LENS_FACING_FRONT
-        } else {
-            CameraSelector.LENS_FACING_BACK
-        }
-        if (isRunning) {
-            startCameraEngine()
-        }
     }
     private fun startAudioCapture() {
         val minBufSize = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -605,10 +652,73 @@ class SService : LifecycleService() {
         when {
             cmd.startsWith("SET_QUALITY:") -> {
                 val newQual = cmd.substringAfter(":").toIntOrNull() ?: return
-                jpegQuality = newQual.coerceIn(1, 100)
                 val prefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
-                prefs.edit().putInt("cam_qual", jpegQuality).apply()
-                broadcastLog("CMD: JPEG_QUALITY_UPDATED -> $jpegQuality%")
+                prefs.edit().putInt("cam_qual", newQual).apply()
+                this.jpegQuality = newQual
+                val resStr = prefs.getString("cam_res", "1280x720") ?: "1280x720"
+                val resParts = resStr.split("x")
+                val w = resParts[0].toInt()
+                val h = resParts[1].toInt()
+                val newBitrate = calculateOptimalBitrate(w, h, newQual)
+                try {
+                    mediaCodec?.let { codec ->
+                        val params = Bundle()
+                        params.putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, newBitrate)
+                        codec.setParameters(params)
+                        broadcastLog("CMD: BITRATE_LIVE_UPDATED -> $newBitrate bps ($newQual%)")
+                    }
+                } catch (e: Exception) {
+                    broadcastLog("ERR: LIVE_BITRATE_FAILED: ${e.message}")
+                }
+            }
+            cmd.startsWith("SWITCH_CAM:") -> {
+                val lensStr = cmd.substringAfter(":")
+                val newLens = lensStr.toIntOrNull() ?: 1
+                lensFacing = if (newLens == 1) CameraSelector.LENS_FACING_BACK else CameraSelector.LENS_FACING_FRONT
+                broadcastLog("CMD: SWITCH_CAMERA -> ${if (newLens == 1) "BACK" else "FRONT"}")
+                Handler(Looper.getMainLooper()).post {
+                    try {
+                        mediaCodec?.stop()
+                        mediaCodec?.release()
+                        mediaCodec = null
+                        val cameraProvider = ProcessCameraProvider.getInstance(this).get()
+                        cameraProvider.unbindAll()
+                        Handler(Looper.getMainLooper()).postDelayed({
+                            if (isRunning) startCameraEngine()
+                        }, 600)
+                    } catch (e: Exception) {
+                        broadcastLog("ERR: SWITCH_FAILED: ${e.message}")
+                    }
+                }
+            }
+            cmd.startsWith("SET_RES:") -> {
+                val newRes = cmd.substringAfter(":")
+                if (newRes.contains("x")) {
+                    val prefs = getSharedPreferences("GaeaPrefs", Context.MODE_PRIVATE)
+                    prefs.edit().putString("cam_res", newRes).apply()
+                    broadcastLog("CMD: RESOLUTION_CHANGE -> $newRes")
+                    Handler(Looper.getMainLooper()).post {
+                        try {
+                            mediaCodec?.stop()
+                            mediaCodec?.release()
+                            mediaCodec = null
+                            val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+                            val cameraProvider = cameraProviderFuture.get()
+                            cameraProvider.unbindAll()
+                            broadcastLog("SYS: RECONFIGURING ENGINES...")
+                            Handler(Looper.getMainLooper()).postDelayed({
+                                if (isRunning) {
+                                    startCameraEngine()
+                                    broadcastLog("SYS: RESOLUTION APPLIED OK")
+                                }
+                            }, 600)
+                        } catch (e: Exception) {
+                            broadcastLog("ERR: SOFT_RESTART_FAILED: ${e.message}")
+                            stopEngines()
+                            startCameraEngine()
+                        }
+                    }
+                }
             }
             cmd.startsWith("VIBRATE") -> {
                 val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -649,6 +759,16 @@ class SService : LifecycleService() {
                     } catch (e: Exception) {
                         broadcastLog("ERR: AUDIO_SYNC_FAILED: ${e.message}")
                     }
+                }
+            }
+            cmd.startsWith("TORCH") -> {
+                try {
+                    torchOn = !torchOn
+                    cameraControl?.enableTorch(torchOn)
+                    broadcastLog("CMD: TORCH -> ${if (torchOn) "ON" else "OFF"}")
+                    Log.d("GAEA", "Torch Toggled: $torchOn")
+                } catch (e: Exception) {
+                    broadcastLog("ERR: TORCH_FAILED: ${e.message}")
                 }
             }
         }
@@ -826,8 +946,9 @@ class SService : LifecycleService() {
                                     VideoVerify(videoFile) //FIRM
                                     broadcastLog("BLACK_BOX: SAVED Qual: $targetQual] -> ${videoFile.name}")
                                     android.media.MediaScannerConnection.scanFile(this, arrayOf(videoFile.absolutePath), null, null)
-                                    if (socket != null && socket!!.isConnected) {
+                                    if (socket != null && socket!!.isConnected && !isSyncInProgress) {
                                         thread {
+                                            isSyncInProgress = true
                                             try {
                                                 val pendingFiles = storageDir.listFiles { f ->
                                                     f.extension == "mp4" && !f.name.contains("_send")
@@ -847,6 +968,8 @@ class SService : LifecycleService() {
                                                 }
                                             } catch (e: Exception) {
                                                 broadcastLog("SYNC_ERR: ${e.message}")
+                                            } finally {
+                                                isSyncInProgress = false
                                             }
                                         }
                                     }
@@ -931,137 +1054,6 @@ class SService : LifecycleService() {
             return "SIGNATURE_ERROR"
         }
     }
-    /*
-     //Old version pre-audio stability modify!
-    private fun isRecModeActive() {
-        if (isThreadRecRunning) return
-        isThreadRecRunning = true
-        broadcastLog("Blackbox called and Enabled!")
-        if (!isRecActive) {
-            broadcastLog("BLACK_BOX: MODE_DISABLED")
-            isThreadRecRunning = false
-            return
-        }
-        val prefs = getSharedPreferences("GaeaPrefs", android.content.Context.MODE_PRIVATE)
-        //val targetRes = prefs.getString("cam_res", "1280x720")
-        val targetQual = prefs.getInt("cam_qual", 30)
-        thread(start = true, name = "GaeaBlackBoxEngine") {
-            try {
-                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                if (audioManager.isBluetoothScoOn) {
-                    audioManager.stopBluetoothSco()
-                    audioManager.isBluetoothScoOn = false
-                }
-                audioManager.mode = AudioManager.MODE_NORMAL
-                audioRecord?.stop()
-                audioRecord?.release()
-                audioRecord = null
-                audioTrack?.stop()
-                audioTrack?.release()
-                audioTrack = null
-                Thread.sleep(150)
-                val storageDir = File(getExternalFilesDir(null), "uplink_rec")
-                if (!storageDir.exists()) storageDir.mkdirs()
-                try {
-                    val noMedia = File(storageDir, ".nomedia")
-                    if (!noMedia.exists()) noMedia.createNewFile()
-                } catch (e: Exception) { }
-                while (isRunning && isRecActive) {
-                    try {
-                        val currentPrefs = getSharedPreferences("GaeaPrefs", android.content.Context.MODE_PRIVATE)
-                        val updatedDurationSec = currentPrefs.getLong("bb_duration", 10L)
-                        val effectiveDurationMs = updatedDurationSec * 1000L
-                        val capture = videoCapture ?: throw Exception("VideoCapture not ready")
-                        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-                        val videoFile = File(storageDir, "REC_$timestamp.mp4")
-                        val fileOptionsBuilder = androidx.camera.video.FileOutputOptions.Builder(videoFile)
-                        try {
-                            val locationManager = getSystemService(android.content.Context.LOCATION_SERVICE) as android.location.LocationManager
-                            val hasFineLoc = androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                            if (hasFineLoc) {
-                                val isGpsEnabled = locationManager.isProviderEnabled(android.location.LocationManager.GPS_PROVIDER)
-                                val isNetworkEnabled = locationManager.isProviderEnabled(android.location.LocationManager.NETWORK_PROVIDER)
-
-                                val lastLocation = locationManager.getLastKnownLocation(android.location.LocationManager.GPS_PROVIDER)
-                                    ?: locationManager.getLastKnownLocation(android.location.LocationManager.NETWORK_PROVIDER)
-                                if (lastLocation != null) {
-                                    fileOptionsBuilder.setLocation(lastLocation)
-                                    broadcastLog("GPS_VERBOSE: [Lat: ${lastLocation.latitude} | Lon: ${lastLocation.longitude}] | Alt: ${lastLocation.altitude}m")
-                                } else {
-                                    broadcastLog("GPS_VERBOSE: Enabled (GPS:$isGpsEnabled, Net:$isNetworkEnabled) but NO_FIX (null location)")
-                                }
-                            } else {
-                                broadcastLog("GPS_VERBOSE: PERMISSION_DENIED (No Fine Location)")
-                            }
-                        } catch (e: Exception) {
-                            broadcastLog("GPS_VERBOSE: ERROR (${e.message})")
-                        }
-                        val fileOptions = fileOptionsBuilder.build()
-                        val pendingRecording = capture.output.prepareRecording(this, fileOptions)
-                        if (androidx.core.content.ContextCompat.checkSelfPermission(
-                                this, android.Manifest.permission.RECORD_AUDIO
-                            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                        ) {
-                            pendingRecording.withAudioEnabled()
-                        }
-                        currentRecording = pendingRecording.start(androidx.core.content.ContextCompat.getMainExecutor(this)) { event ->
-                            if (event is androidx.camera.video.VideoRecordEvent.Finalize) {
-                                if (!event.hasError()) {
-                                    broadcastLog("BLACK_BOX: SAVED Qual: $targetQual] -> ${videoFile.name}")
-                                  //  /* [Res: $targetRes | */
-                                    android.media.MediaScannerConnection.scanFile(
-                                        this,
-                                        arrayOf(videoFile.absolutePath),
-                                        null,
-                                        null
-                                    )
-                                    if (socket != null && socket!!.isConnected) {
-                                        thread {
-                                            try {
-                                                val pendingFiles = storageDir.listFiles { f ->
-                                                    f.extension == "mp4" && !f.name.contains("_send")
-                                                }?.sortedBy { it.name }
-                                                pendingFiles?.forEach { file ->
-                                                    if (socket == null || !socket!!.isConnected) return@forEach
-                                                    if (file.exists() && file.length() > 0) {
-                                                        val fileBytes = file.readBytes()
-                                                        sendData(4, fileBytes)
-                                                        val newName = file.name.replace(".mp4", "_send.mp4")
-                                                        val moved = file.renameTo(File(storageDir, newName))
-                                                        if (moved) {
-                                                            broadcastLog("SYNC: UPLOAD_OK (${newName})")
-                                                        }
-                                                        Thread.sleep(300)
-                                                    }
-                                                }
-                                            } catch (e: Exception) {
-                                                broadcastLog("SYNC_ERR: ${e.message}")
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    broadcastLog("BLACK_BOX_ERR: Finalize error ${event.error}")
-                                }
-                            }
-                        }
-                        broadcastLog("BLACK_BOX: RECORDING_START") //($targetRes)
-                        Thread.sleep(effectiveDurationMs)
-                        currentRecording?.stop()
-                        currentRecording = null
-                        Thread.sleep(350) //default: 50ms or 150/250/300ms for remove GAP
-                    } catch (e: Exception) {
-                        broadcastLog("BLACK_BOX_ERR: ${e.message}")
-                        Thread.sleep(3000)
-                    }
-                }
-            } finally {
-                currentRecording?.stop()
-                isThreadRecRunning = false
-                broadcastLog("BLACK_BOX: THREAD_TERMINATED")
-            }
-        }
-    }
-    */
     private fun broadcastLog(msg: String) {
         val intent = Intent(LOG_ACTION).apply {
             putExtra(EXTRA_MSG, msg); setPackage(packageName)
@@ -1071,6 +1063,16 @@ class SService : LifecycleService() {
     private fun stopEngines() {
         isRunning = false
         broadcastLog("NET: STOPPING ENGINES...")
+        try {
+            mediaCodec?.let {
+                it.stop()
+                it.release()
+                broadcastLog("CODEC: H.264 ENCODER RELEASED")
+            }
+        } catch (e: Exception) {
+            Log.e("GAEA", "Error releasing MediaCodec: ${e.message}")
+        }
+        mediaCodec = null
         try {
             outputStream?.flush()
             outputStream?.close()

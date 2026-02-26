@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000"
     android:orientation="vertical"
     android:padding="16dp">
+
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -33,26 +35,13 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
         android:orientation="horizontal">
-        <EditText
-            android:id="@+id/etFps"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:layout_marginEnd="4dp"
-            android:background="#111111"
-            android:hint="FPS"
-            android:inputType="number"
-            android:padding="12dp"
-            android:text="7"
-            android:textColor="#00FF41"
-            android:textColorHint="#004411"
-            android:textSize="14sp"
-            android:typeface="monospace" />
+
         <Spinner
             android:id="@+id/etRes"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"  android:layout_weight="1.5"
+            android:layout_width="106dp"
+            android:layout_height="wrap_content"
             android:layout_marginHorizontal="4dp"
+            android:layout_weight="1.5"
             android:background="#111111"
             android:entries="@array/resolutions_array"
             android:padding="12dp"
@@ -73,16 +62,17 @@
             android:textSize="14sp"
             android:typeface="monospace" />
     </LinearLayout>
+
     <Button
         android:id="@+id/btnConnect"
         android:layout_width="match_parent"
-        android:layout_height="50dp"
+        android:layout_height="80dp"
         android:layout_marginTop="8dp"
         android:backgroundTint="#003300"
         android:text="INIT_ESTABLISH_LINK"
         android:textColor="#00FF41"
-        android:typeface="monospace"
-        android:textSize="14sp" />
+        android:textSize="14sp"
+        android:typeface="monospace" />
     <TextView
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
@@ -193,6 +183,7 @@
                 android:typeface="monospace"
                 android:textSize="11sp"
                 android:layout_marginStart="4dp" />
+
         </RadioGroup>
     </LinearLayout>
 </LinearLayout>

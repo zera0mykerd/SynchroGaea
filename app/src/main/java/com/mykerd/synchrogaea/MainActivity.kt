@@ -41,7 +41,7 @@ class MainActivity : Activity() {
         logScroll = findViewById(R.id.logScroll)
         val btnConnect = findViewById<Button>(R.id.btnConnect)
         val etAddress = findViewById<EditText>(R.id.etAddress)
-        val etFps = findViewById<EditText>(R.id.etFps)
+        //val etFps = findViewById<EditText>(R.id.etFps)
         val etRes = findViewById<Spinner>(R.id.etRes)
         val etDuration = findViewById<EditText>(R.id.etDuration)
         val adapter = android.widget.ArrayAdapter.createFromResource(
@@ -73,7 +73,7 @@ class MainActivity : Activity() {
         }
         val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val lastSavedIp = prefs.getString(KEY_IP, "192.168.1.220:9999")
-        etFps?.setText(prefs.getLong("cam_fps", 7L).toString())
+        //etFps?.setText(prefs.getLong("cam_fps", 7L).toString())
         etAddress?.setText(lastSavedIp)
         etDuration?.setText(prefs.getLong("bb_duration", 10L).toString())
         val savedRes = prefs.getString("cam_res", "1280x720")
@@ -132,19 +132,21 @@ class MainActivity : Activity() {
             val rawInput = etAddress?.text?.toString() ?: ""
             val servers = rawInput.split(";").map { it.trim() }.filter { it.contains(":") }
             if (servers.isNotEmpty()) {
+                val selectedRes = etRes.selectedItem?.toString()?.split(" ")?.get(0) ?: "1280x720"
+                val selectedQual = etQuality?.text?.toString()?.toIntOrNull() ?: 30
                 prefs.edit().apply {
                     putString(KEY_IP, rawInput)
-                    putLong("cam_fps", etFps?.text?.toString()?.toLongOrNull() ?: 7L)
-                    putString("cam_res", etRes?.selectedItem?.toString()?.split(" ")?.get(0) ?: "1280x720")
-                    putInt("cam_qual", etQuality?.text?.toString()?.toIntOrNull() ?: 30)
+                    putLong("cam_fps", 30L)
+                    putString("cam_res", selectedRes)
+                    putInt("cam_qual", selectedQual)
                     putLong("bb_duration", etDuration?.text?.toString()?.toLongOrNull() ?: 10L)
                     apply()
                 }
-                logTerminal("MULTI_LINK_INIT: ${servers.size} TARGETS")
-                //initiateConnection(rawInput)
+                logTerminal("CONFIG_SAVED: $selectedRes @ Quality $selectedQual")
                 configureServersAuth(servers, 0)
+
             } else {
-                logTerminal("SYNTAX_ERROR: USE IP:PORT ; IP:PORT")
+                logTerminal("SYNTAX_ERROR: Use IP:PORT ; IP:PORT")
             }
         }
     }
