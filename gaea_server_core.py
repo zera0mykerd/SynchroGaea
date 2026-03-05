@@ -374,7 +374,7 @@ function onMsg(e){
         fpsT=now; 
     }
     let bIcon = parseInt(lastBatt) <= 20 ? '🪫' : '🔋';
-    setS('ok', 'H.264 STREAMING - ' + fps + ' FPS | BACT: ' + lastBatt + '% ' + bIcon);
+    setS('ok', 'H.264 STREAMING - ' + fps + ' FPS | BATT: ' + lastBatt + '% ' + bIcon);
   } else if(type===2){
     playPCM(payload);
   } else if(type===130){
